@@ -1,0 +1,18 @@
+{
+  "name": "PelletRoute - Gestión y Optimización de Reparto de Pellets",
+  "short_name": "PelletRoute",
+  "description": "PWA para gestionar y optimizar el reparto de pellets de madera a domicilio",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#d97706",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
