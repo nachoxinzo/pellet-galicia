@@ -38,13 +38,17 @@ export async function searchGoogleMapsLive(
   query: string,
   apiKey?: string
 ): Promise<GoogleSearchResultItem[]> {
-  const trimmed = query.trim();
+  const trimmed = query.trim().slice(0, 120);
   if (!trimmed || trimmed.length < 2) return [];
 
   try {
-    const keyParam = apiKey ? `&apiKey=${encodeURIComponent(apiKey)}` : "";
+    const headers: Record<string, string> = {};
+    if (apiKey?.trim()) {
+      headers["x-google-maps-key"] = apiKey.trim();
+    }
     const res = await fetch(
-      `/api/search-google-maps?q=${encodeURIComponent(trimmed)}${keyParam}`
+      `/api/search-google-maps?q=${encodeURIComponent(trimmed)}`,
+      { headers }
     );
     if (!res.ok) return [];
     const data = await res.json();

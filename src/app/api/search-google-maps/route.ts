@@ -348,15 +348,58 @@ async function searchNominatim(query: string): Promise<GoogleMapsSearchResult[]>
   }
 }
 
+const SEARCH_RATE_LIMIT_WINDOW_MS = 60_000;
+const SEARCH_RATE_LIMIT_MAX_REQ = 30;
+const MAX_QUERY_LENGTH = 120;
+const searchRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function checkSearchRateLimit(req: NextRequest): boolean {
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown";
+  const now = Date.now();
+  const entry = searchRateLimitMap.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    searchRateLimitMap.set(ip, {
+      count: 1,
+      resetAt: now + SEARCH_RATE_LIMIT_WINDOW_MS,
+    });
+    return true;
+  }
+  if (entry.count >= SEARCH_RATE_LIMIT_MAX_REQ) {
+    return false;
+  }
+  entry.count += 1;
+  return true;
+}
+
 export async function GET(req: NextRequest) {
   try {
+    if (!checkSearchRateLimit(req)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Demasiadas búsquedas seguidas. Espera unos segundos.",
+        },
+        { status: 429 }
+      );
+    }
+
     const { searchParams } = new URL(req.url);
-    const query = (searchParams.get("q") || "").trim();
+    const query = (searchParams.get("q") || "")
+      .trim()
+      .slice(0, MAX_QUERY_LENGTH);
+
+    // Aceptar API Key por cabecera HTTP privada (preferido) o variable de entorno del servidor
     const apiKey = (
-      searchParams.get("apiKey") ||
+      req.headers.get("x-google-maps-key") ||
       process.env.GOOGLE_MAPS_API_KEY ||
       ""
-    ).trim();
+    )
+      .trim()
+      .slice(0, 128);
 
     if (!query || query.length < 2) {
       return NextResponse.json({ success: true, results: [] });
@@ -391,8 +434,6 @@ export async function GET(req: NextRequest) {
 
     // Prioridad 2: Resultados de Photon y Nominatim
     for (const item of [...photonRes, ...nomRes]) {
-      // Si el usuario escribió un texto largo (ej. nombre de un local o calle) y Photon/Nominatim
-      // solo devolvió el municipio genérico, no lo ponemos primero; se muestra con la etiqueta de aviso
       combined.push(item);
     }
 
@@ -414,10 +455,10 @@ export async function GET(req: NextRequest) {
       mode: gmapsDirectRes ? "google_maps_direct" : "fallback_rural",
       results: deduplicated.slice(0, 8),
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error en /api/search-google-maps:", err);
     return NextResponse.json(
-      { success: false, error: err?.message || "Error buscando en el mapa" },
+      { success: false, error: "Error interno realizando la búsqueda en el mapa." },
       { status: 500 }
     );
   }

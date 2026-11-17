@@ -565,7 +565,7 @@ class LocalGaliciaStorageService {
   exportBackupJson(): string {
     const customers = this.getCustomers();
     const orders = this.getOrders();
-    const config = this.getConfig();
+    const { googleMapsApiKey: _omitSecret, ...safeConfig } = this.getConfig();
     const nowIso = new Date().toISOString();
 
     if (this.isBrowser()) {
@@ -580,7 +580,7 @@ class LocalGaliciaStorageService {
       data: {
         customers,
         orders,
-        config,
+        config: safeConfig,
       },
     };
 
@@ -589,24 +589,178 @@ class LocalGaliciaStorageService {
 
   importBackupJson(jsonString: string): boolean {
     try {
+      if (!jsonString || jsonString.length > 10 * 1024 * 1024) {
+        throw new Error("El archivo de backup supera el tamaño máximo permitido (10 MB).");
+      }
+
       const parsed = JSON.parse(jsonString);
-      if (!parsed.data) throw new Error("Formato de backup inválido.");
+      if (!parsed || typeof parsed !== "object" || !parsed.data) {
+        throw new Error("Formato de backup inválido.");
+      }
+
+      const now = new Date().toISOString();
 
       if (Array.isArray(parsed.data.customers)) {
-        this.write(STORAGE_KEYS.CUSTOMERS, parsed.data.customers);
+        const sanitizedCustomers: Customer[] = parsed.data.customers
+          .slice(0, 5000)
+          .map((c: any, idx: number): Customer | null => {
+            if (!c || typeof c !== "object" || typeof c.name !== "string") {
+              return null;
+            }
+            const lat = Number(c.coordinates?.lat);
+            const lng = Number(c.coordinates?.lng);
+            if (
+              !Number.isFinite(lat) ||
+              !Number.isFinite(lng) ||
+              Math.abs(lat) > 90 ||
+              Math.abs(lng) > 180
+            ) {
+              return null;
+            }
+            return {
+              id: String(c.id || `cust-${Date.now()}-${idx}`).slice(0, 64),
+              name: c.name.trim().slice(0, 140),
+              village: String(c.village || "").trim().slice(0, 240),
+              phone: String(c.phone || "").trim().slice(0, 40),
+              coordinates: { lat, lng },
+              internalNotes: String(c.internalNotes || "").trim().slice(0, 500),
+              ultimosSacos: Math.max(
+                1,
+                Math.min(500, Math.floor(Number(c.ultimosSacos) || 30))
+              ),
+              fechaUltimoPedido: String(c.fechaUltimoPedido || now),
+              totalPedidosHistorico: Math.max(
+                0,
+                Math.floor(Number(c.totalPedidosHistorico) || 0)
+              ),
+              totalSacosHistorico: Math.max(
+                0,
+                Math.floor(Number(c.totalSacosHistorico) || 0)
+              ),
+              createdAt: String(c.createdAt || now),
+              updatedAt: String(c.updatedAt || now),
+            };
+          })
+          .filter((c: Customer | null): c is Customer => c !== null);
+
+        this.write(STORAGE_KEYS.CUSTOMERS, sanitizedCustomers);
       }
+
       if (Array.isArray(parsed.data.orders)) {
-        this.write(STORAGE_KEYS.ORDERS, parsed.data.orders);
+        const sanitizedOrders: PendingOrder[] = parsed.data.orders
+          .slice(0, 10000)
+          .map((o: any, idx: number): PendingOrder | null => {
+            if (!o || typeof o !== "object" || !o.customer) return null;
+            const lat = Number(o.customer?.coordinates?.lat);
+            const lng = Number(o.customer?.coordinates?.lng);
+            if (
+              !Number.isFinite(lat) ||
+              !Number.isFinite(lng) ||
+              Math.abs(lat) > 90 ||
+              Math.abs(lng) > 180
+            ) {
+              return null;
+            }
+            const sacks = Math.max(
+              1,
+              Math.min(500, Math.floor(Number(o.sacks) || 1))
+            );
+            const status: PendingOrder["status"] =
+              o.status === "Completado" || o.status === "En Ruta"
+                ? o.status
+                : "Pendiente";
+
+            return {
+              id: String(o.id || `ord-${Date.now()}-${idx}`).slice(0, 64),
+              customerId: String(o.customerId || o.customer.id || "").slice(
+                0,
+                64
+              ),
+              customer: {
+                id: String(o.customer.id || `cust-${idx}`).slice(0, 64),
+                name: String(o.customer.name || "Cliente").trim().slice(0, 140),
+                village: String(o.customer.village || "").trim().slice(0, 240),
+                phone: String(o.customer.phone || "").trim().slice(0, 40),
+                coordinates: { lat, lng },
+                internalNotes: String(o.customer.internalNotes || "")
+                  .trim()
+                  .slice(0, 500),
+                createdAt: String(o.customer.createdAt || now),
+                updatedAt: String(o.customer.updatedAt || now),
+              },
+              sacks,
+              totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+              orderNotes: String(o.orderNotes || "").trim().slice(0, 500),
+              createdAt: String(o.createdAt || now),
+              status,
+            };
+          })
+          .filter((o: PendingOrder | null): o is PendingOrder => o !== null);
+
+        this.write(STORAGE_KEYS.ORDERS, sanitizedOrders);
       }
-      if (parsed.data.config) {
-        this.write(STORAGE_KEYS.CONFIG, parsed.data.config);
+
+      if (parsed.data.config && typeof parsed.data.config === "object") {
+        const rawCfg = parsed.data.config;
+        const currentCfg = this.getConfig();
+        const cap = Math.max(
+          10,
+          Math.min(
+            500,
+            Math.floor(
+              Number(rawCfg.vanCapacitySacks) || currentCfg.vanCapacitySacks
+            )
+          )
+        );
+        const whLat = Number(rawCfg.warehouseCoordinates?.lat);
+        const whLng = Number(rawCfg.warehouseCoordinates?.lng);
+
+        const safeCfg: VanConfig = {
+          ...currentCfg,
+          vanCapacitySacks: cap,
+          maxWeightKg: cap * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+          warehouseName: String(
+            rawCfg.warehouseName || currentCfg.warehouseName
+          )
+            .trim()
+            .slice(0, 140),
+          warehouseVillage: String(
+            rawCfg.warehouseVillage || currentCfg.warehouseVillage
+          )
+            .trim()
+            .slice(0, 240),
+          warehouseCoordinates: {
+            lat:
+              Number.isFinite(whLat) && Math.abs(whLat) <= 90
+                ? whLat
+                : currentCfg.warehouseCoordinates.lat,
+            lng:
+              Number.isFinite(whLng) && Math.abs(whLng) <= 180
+                ? whLng
+                : currentCfg.warehouseCoordinates.lng,
+          },
+          consumoVacioL100: Math.max(
+            2,
+            Math.min(40, Number(rawCfg.consumoVacioL100) || 8.5)
+          ),
+          extraConsumoPorTonelada: Math.max(
+            0,
+            Math.min(20, Number(rawCfg.extraConsumoPorTonelada) || 2.2)
+          ),
+          precioCombustible: Math.max(
+            0.3,
+            Math.min(10, Number(rawCfg.precioCombustible) || 1.55)
+          ),
+          precioPorSaco: Math.max(
+            0.5,
+            Math.min(50, Number(rawCfg.precioPorSaco) || 4.5)
+          ),
+        };
+        this.write(STORAGE_KEYS.CONFIG, safeCfg);
       }
 
       if (this.isBrowser()) {
-        localStorage.setItem(
-          STORAGE_KEYS.LAST_BACKUP_AT,
-          new Date().toISOString()
-        );
+        localStorage.setItem(STORAGE_KEYS.LAST_BACKUP_AT, now);
         this.write(STORAGE_KEYS.ORDERS_SINCE_BACKUP, 0);
       }
 

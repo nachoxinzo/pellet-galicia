@@ -111,13 +111,17 @@ export function encodeTripPayload(payload: EphemeralTripPayload): string {
   return LZString.compressToEncodedURIComponent(jsonStr);
 }
 
+const MAX_ENCODED_URL_LENGTH = 8_192; // 8 KB máx en URL
+const MAX_DECOMPRESSED_JSON_LENGTH = 65_536; // 64 KB máx tras descomprimir
+const MAX_STOPS_PER_TRIP = 50;
+
 /**
  * Decodifica y descomprime el payload desde el parámetro ?r=...
  * Mantiene compatibilidad total tanto con el formato ultracompacto de 1 letra (u: 2)
- * como con el formato anterior (v: "1.0").
+ * como con el formato anterior (v: "1.0"), aplicando límites contra bombas de descompresión.
  */
 export function decodeTripPayload(encoded: string): EphemeralTripPayload | null {
-  if (!encoded) return null;
+  if (!encoded || encoded.length > MAX_ENCODED_URL_LENGTH) return null;
 
   try {
     let jsonStr = LZString.decompressFromEncodedURIComponent(encoded);
@@ -133,44 +137,126 @@ export function decodeTripPayload(encoded: string): EphemeralTripPayload | null 
       }
     }
 
-    if (!jsonStr) return null;
+    if (!jsonStr || jsonStr.length > MAX_DECOMPRESSED_JSON_LENGTH) return null;
     const parsed = JSON.parse(jsonStr);
+    if (!parsed || typeof parsed !== "object") return null;
 
     // Formato Ultracompacto v2 (claves de 1 letra: i, n, a, x, y, s, c, t)
-    if (parsed && (parsed.u === 2 || Array.isArray(parsed.p))) {
+    if (parsed.u === 2 || Array.isArray(parsed.p)) {
       const wire = parsed as UltraCompactTripWire;
-      const expandedStops: EphemeralStop[] = (wire.p || []).map(
-        (item: UltraCompactStopWire, idx: number) => ({
-          seq: idx + 1,
-          id: item.i || `s-${idx + 1}`,
-          name: item.n || "Cliente",
-          village: item.a || "",
-          lat: Number(item.x) || 42.2982,
-          lng: Number(item.y) || -7.8185,
-          sacks: Number(item.s) || 0,
-          totalWeightKg:
-            (Number(item.s) || 0) * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
-          cashToCollectEur: Number(item.c) || 0,
-          tags: item.t || "",
+      const rawStops = Array.isArray(wire.p)
+        ? wire.p.slice(0, MAX_STOPS_PER_TRIP)
+        : [];
+
+      const expandedStops: EphemeralStop[] = rawStops
+        .map((item: UltraCompactStopWire, idx: number): EphemeralStop | null => {
+          const lat = Number(item?.x);
+          const lng = Number(item?.y);
+          if (
+            !Number.isFinite(lat) ||
+            !Number.isFinite(lng) ||
+            Math.abs(lat) > 90 ||
+            Math.abs(lng) > 180
+          ) {
+            return null;
+          }
+          const sacks = Math.max(
+            1,
+            Math.min(500, Math.floor(Number(item?.s) || 1))
+          );
+          return {
+            seq: idx + 1,
+            id: String(item.i || `s-${idx + 1}`).slice(0, 32),
+            name: String(item.n || "Cliente").slice(0, 120),
+            village: String(item.a || "").slice(0, 200),
+            lat,
+            lng,
+            sacks,
+            totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+            cashToCollectEur: Math.max(
+              0,
+              Math.min(50_000, Number(item.c) || 0)
+            ),
+            tags: String(item.t || "").slice(0, 160),
+          };
         })
-      );
+        .filter((s): s is EphemeralStop => s !== null);
+
+      const whLat = Number(wire.w?.x);
+      const whLng = Number(wire.w?.y);
 
       return {
         v: "1.0",
-        tripNum: wire.k || 1,
-        date: wire.d || new Date().toISOString().split("T")[0],
+        tripNum: Math.max(1, Math.min(99, Number(wire.k) || 1)),
+        date: String(wire.d || new Date().toISOString().split("T")[0]).slice(
+          0,
+          20
+        ),
         warehouse: {
-          name: wire.w?.n || "Almacén Central",
-          lat: Number(wire.w?.x) || 42.2982,
-          lng: Number(wire.w?.y) || -7.8185,
+          name: String(wire.w?.n || "Almacén Central").slice(0, 120),
+          lat:
+            Number.isFinite(whLat) && Math.abs(whLat) <= 90 ? whLat : 42.2982,
+          lng:
+            Number.isFinite(whLng) && Math.abs(whLng) <= 180 ? whLng : -7.8185,
         },
         stops: expandedStops,
       };
     }
 
-    // Compatibilidad hacia atrás con el formato v1.0 anterior
-    if (parsed && Array.isArray(parsed.stops)) {
-      return parsed as EphemeralTripPayload;
+    // Compatibilidad hacia atrás con el formato v1.0 anterior (con validación de campos)
+    if (Array.isArray(parsed.stops)) {
+      const safeStops: EphemeralStop[] = parsed.stops
+        .slice(0, MAX_STOPS_PER_TRIP)
+        .map((st: any, idx: number): EphemeralStop | null => {
+          const lat = Number(st?.lat);
+          const lng = Number(st?.lng);
+          if (
+            !Number.isFinite(lat) ||
+            !Number.isFinite(lng) ||
+            Math.abs(lat) > 90 ||
+            Math.abs(lng) > 180
+          ) {
+            return null;
+          }
+          const sacks = Math.max(
+            1,
+            Math.min(500, Math.floor(Number(st?.sacks) || 1))
+          );
+          return {
+            seq: idx + 1,
+            id: String(st?.id || `s-${idx + 1}`).slice(0, 32),
+            name: String(st?.name || "Cliente").slice(0, 120),
+            village: String(st?.village || "").slice(0, 200),
+            lat,
+            lng,
+            sacks,
+            totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+            cashToCollectEur: Math.max(
+              0,
+              Math.min(50_000, Number(st?.cashToCollectEur) || 0)
+            ),
+            tags: String(st?.tags || "").slice(0, 160),
+          };
+        })
+        .filter((s: EphemeralStop | null): s is EphemeralStop => s !== null);
+
+      return {
+        v: "1.0",
+        tripNum: Math.max(1, Math.min(99, Number(parsed.tripNum) || 1)),
+        date: String(parsed.date || new Date().toISOString().split("T")[0]).slice(
+          0,
+          20
+        ),
+        warehouse: {
+          name: String(parsed.warehouse?.name || "Almacén Central").slice(
+            0,
+            120
+          ),
+          lat: Number(parsed.warehouse?.lat) || 42.2982,
+          lng: Number(parsed.warehouse?.lng) || -7.8185,
+        },
+        stops: safeStops,
+      };
     }
 
     return null;

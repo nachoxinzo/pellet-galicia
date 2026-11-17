@@ -173,10 +173,111 @@ async function reverseGeocodeGalicia(
   }
 }
 
+const ALLOWED_MAP_HOSTS = new Set([
+  "maps.app.goo.gl",
+  "goo.gl",
+  "www.google.com",
+  "google.com",
+  "maps.google.com",
+  "www.google.es",
+  "google.es",
+  "maps.google.es",
+]);
+
+const MAX_INPUT_LENGTH = 2_048;
+const MAX_REDIRECT_HOPS = 5;
+const MAX_HTML_BYTES = 262_144; // 256 KB máx de lectura HTML
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQ = 25;
+
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+function checkResolveRateLimit(req: NextRequest): boolean {
+  const ip =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown";
+  const now = Date.now();
+  const entry = rateLimitStore.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    rateLimitStore.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= RATE_LIMIT_MAX_REQ) {
+    return false;
+  }
+  entry.count += 1;
+  return true;
+}
+
+function validateAllowedGoogleMapsUrl(rawUrl: string): URL | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:") return null;
+    if (parsed.username || parsed.password || parsed.port) return null;
+    const host = parsed.hostname.toLowerCase();
+    if (!ALLOWED_MAP_HOSTS.has(host)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function readBoundedText(
+  res: Response,
+  maxBytes: number
+): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let received = 0;
+  let result = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        received += value.byteLength;
+        if (received > maxBytes) {
+          result += decoder.decode(
+            value.subarray(0, maxBytes - (received - value.byteLength)),
+            { stream: false }
+          );
+          await reader.cancel();
+          break;
+        }
+        result += decoder.decode(value, { stream: true });
+      }
+    }
+    result += decoder.decode();
+  } catch {
+    // Ignorar corte de stream al alcanzar el límite
+  }
+  return result;
+}
+
 export async function POST(req: NextRequest) {
   try {
+    if (!checkResolveRateLimit(req)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Demasiadas peticiones. Espera unos segundos e inténtalo de nuevo.",
+        },
+        { status: 429 }
+      );
+    }
+
     const body = await req.json();
-    const input: string = (body.url || body.text || "").trim();
+    const rawInput =
+      typeof body?.url === "string"
+        ? body.url
+        : typeof body?.text === "string"
+        ? body.text
+        : "";
+    const input: string = rawInput.trim().slice(0, MAX_INPUT_LENGTH);
 
     if (!input) {
       return NextResponse.json(
@@ -188,60 +289,96 @@ export async function POST(req: NextRequest) {
     // A) Probar si el texto original ya contiene coordenadas directas (DMS o decimales)
     let extracted = extractCoordinatesFromText(input);
 
-    // B) Buscar si contiene una URL (especialmente enlaces acortados o de Google Maps)
+    // B) Buscar si contiene una URL (exclusivamente dominios HTTPS de Google Maps)
     const urlRegex = /(https?:\/\/[^\s<>"']+)/i;
     const urlMatch = input.match(urlRegex);
 
     let expandedUrl = "";
-    if (urlMatch) {
-      const targetUrl = urlMatch[1];
+    if (urlMatch && !extracted) {
+      const validatedInitialUrl = validateAllowedGoogleMapsUrl(urlMatch[1]);
+      if (!validatedInitialUrl) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Enlace no permitido. Por seguridad solo se admiten enlaces HTTPS oficiales de Google Maps.",
+          },
+          { status: 400 }
+        );
+      }
 
       try {
-        const response = await fetch(targetUrl, {
-          method: "GET",
-          redirect: "follow",
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "es-ES,es;q=0.9,gl;q=0.8,en;q=0.7",
-          },
-        });
+        let currentUrl = validatedInitialUrl.toString();
+        let finalResponse: Response | null = null;
 
-        expandedUrl = response.url || targetUrl;
+        for (let hop = 0; hop < MAX_REDIRECT_HOPS; hop++) {
+          const response = await fetch(currentUrl, {
+            method: "GET",
+            redirect: "manual",
+            signal: AbortSignal.timeout(4000),
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "es-ES,es;q=0.9,gl;q=0.8",
+            },
+          });
 
-        // 1. Probar en la URL expandida (aquí suele venir !3dLAT!4dLNG o @LAT,LNG)
-        const expandedMatch = extractCoordinatesFromText(expandedUrl);
-        if (expandedMatch) {
-          extracted = expandedMatch;
-        } else {
-          // 2. Si no viene en la URL final, inspeccionar el HTML devuelto
-          const html = await response.text();
+          if (response.status >= 300 && response.status < 400) {
+            const locationHeader = response.headers.get("location");
+            if (!locationHeader) break;
 
-          // Buscar en meta refresh o enlaces de redirección en el HTML
-          const metaRefreshMatch = html.match(
-            /meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["']?\d+;\s*url=([^"'>]+)["']/i
-          );
-          if (metaRefreshMatch) {
-            const redirectUrl = metaRefreshMatch[1];
-            const metaCoord = extractCoordinatesFromText(redirectUrl);
-            if (metaCoord) {
-              extracted = metaCoord;
-              expandedUrl = redirectUrl;
+            const candidateUrl = new URL(locationHeader, currentUrl).toString();
+            const hopCoord = extractCoordinatesFromText(candidateUrl);
+            if (hopCoord) {
+              extracted = hopCoord;
+              expandedUrl = candidateUrl;
+              break;
             }
+
+            const validatedNext = validateAllowedGoogleMapsUrl(candidateUrl);
+            if (!validatedNext) {
+              break;
+            }
+            currentUrl = validatedNext.toString();
+            expandedUrl = currentUrl;
+            continue;
           }
 
-          // Buscar patrones directamente en el contenido del HTML
-          if (!extracted) {
-            const htmlCoord = extractCoordinatesFromText(html);
-            if (htmlCoord) {
-              extracted = htmlCoord;
+          finalResponse = response;
+          expandedUrl = currentUrl;
+          break;
+        }
+
+        if (!extracted && expandedUrl) {
+          const expandedMatch = extractCoordinatesFromText(expandedUrl);
+          if (expandedMatch) {
+            extracted = expandedMatch;
+          } else if (finalResponse) {
+            const html = await readBoundedText(finalResponse, MAX_HTML_BYTES);
+
+            const metaRefreshMatch = html.match(
+              /meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["']?\d+;\s*url=([^"'>]+)["']/i
+            );
+            if (metaRefreshMatch) {
+              const redirectUrl = metaRefreshMatch[1];
+              const metaCoord = extractCoordinatesFromText(redirectUrl);
+              if (metaCoord) {
+                extracted = metaCoord;
+              }
+            }
+
+            if (!extracted) {
+              const htmlCoord = extractCoordinatesFromText(html);
+              if (htmlCoord) {
+                extracted = htmlCoord;
+              }
             }
           }
         }
-      } catch (fetchErr: any) {
-        console.warn("Error expandiendo enlace de mapa:", fetchErr?.message);
+      } catch {
+        // Silenciar detalles internos de red
       }
     }
 
@@ -267,15 +404,14 @@ export async function POST(req: NextRequest) {
       lat: extracted.lat,
       lng: extracted.lng,
       source: extracted.source,
-      expandedUrl: expandedUrl || undefined,
       resolvedAddress: resolvedAddress || undefined,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error en /api/resolve-map-link:", error);
     return NextResponse.json(
       {
         success: false,
-        error: error?.message || "Error procesando el enlace de ubicación.",
+        error: "Error interno procesando el enlace de ubicación.",
       },
       { status: 500 }
     );
