@@ -73,6 +73,8 @@ export default function ConfigBackupTab({
   const [lng, setLng] = useState(config.warehouseCoordinates.lng.toFixed(6));
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isBackupOpen, setIsBackupOpen] = useState(false);
+  const [isConfirmingClear, setIsConfirmingClear] = useState(false);
+  const [clearedFeedback, setClearedFeedback] = useState(false);
 
   // Buscador para el almacén
   const [searchQuery, setSearchQuery] = useState("");
@@ -140,14 +142,11 @@ export default function ConfigBackupTab({
   };
 
   const handleClearDatabase = () => {
-    if (
-      confirm(
-        "⚠️ ¿Estás seguro de que deseas vaciar toda la base de datos?\n\nSe eliminarán todos los clientes y pedidos guardados en este navegador para que puedas empezar tu base de datos desde cero."
-      )
-    ) {
-      galiciaStorage.clearAllData();
-      onRefreshAll();
-    }
+    galiciaStorage.clearAllData();
+    setIsConfirmingClear(false);
+    setClearedFeedback(true);
+    setTimeout(() => setClearedFeedback(false), 3500);
+    onRefreshAll();
   };
 
   return (
@@ -465,15 +464,36 @@ export default function ConfigBackupTab({
             <span>Gestionar Backup (JSON)</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleClearDatabase}
-            className="px-4 py-2.5 rounded-2xl bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold text-xs border border-red-500/30 flex items-center gap-1.5 transition"
-            title="Eliminar todos los clientes y pedidos de la base de datos"
-          >
-            <Trash2 className="w-4 h-4" />
-            <span>Vaciar Base de Datos</span>
-          </button>
+          {isConfirmingClear ? (
+            <div className="flex items-center gap-1.5 bg-red-950/60 border border-red-500/50 p-1 rounded-2xl">
+              <button
+                type="button"
+                onClick={handleClearDatabase}
+                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-xs transition"
+              >
+                ⚠️ Sí, borrar todo
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsConfirmingClear(false)}
+                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition"
+              >
+                Cancelar
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setIsConfirmingClear(true)}
+              className="px-4 py-2.5 rounded-2xl bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold text-xs border border-red-500/30 flex items-center gap-1.5 transition"
+              title="Eliminar todos los clientes y pedidos de la base de datos"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>
+                {clearedFeedback ? "✓ Base de datos vaciada" : "Vaciar Base de Datos"}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 

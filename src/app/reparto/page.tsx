@@ -10,6 +10,7 @@ import {
 import {
   decodeTripPayload,
   buildGoogleMapsSingleClientUrl,
+  encodeReturnReceipt,
 } from "@/utils/galiciaUrlCodec";
 import {
   Navigation,
@@ -25,6 +26,8 @@ import {
   Copy,
   WifiOff,
   Banknote,
+  Phone,
+  MessageCircle,
 } from "lucide-react";
 
 const EPHEMERAL_STORAGE_KEY = "pelletgalicia_ephemeral_payload_session";
@@ -33,6 +36,12 @@ const COMPLETED_STATS_KEY = "pelletgalicia_completed_stats_session";
 interface CompletedStats {
   completedStopsCount: number;
   completedSacksCount: number;
+  collectedCashEur: number;
+  deliveredItems: {
+    shortId: string;
+    sacks: number;
+    cashCollectedEur: number;
+  }[];
 }
 
 function RepartoContent() {
@@ -43,12 +52,15 @@ function RepartoContent() {
   const [stats, setStats] = useState<CompletedStats>({
     completedStopsCount: 0,
     completedSacksCount: 0,
+    collectedCashEur: 0,
+    deliveredItems: [],
   });
   const [isLoaded, setIsLoaded] = useState(false);
 
   // 2. DETECTOR DE ESTADO DE RED PARA EL RURAL SIN COBERTURA
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [copiedStopId, setCopiedStopId] = useState<string | null>(null);
+  const [copiedReceiptToken, setCopiedReceiptToken] = useState(false);
 
   // Modal de confirmación para evitar toques accidentales con guantes de trabajo
   const [confirmingStop, setConfirmingStop] = useState<EphemeralStop | null>(
@@ -83,6 +95,8 @@ function RepartoContent() {
         const initialStats: CompletedStats = {
           completedStopsCount: 0,
           completedSacksCount: 0,
+          collectedCashEur: 0,
+          deliveredItems: [],
         };
         setStats(initialStats);
 
@@ -123,7 +137,15 @@ function RepartoContent() {
         setStops(storedPayload.stops || []);
       }
       if (rawStats) {
-        setStats(JSON.parse(rawStats));
+        const parsedStats = JSON.parse(rawStats);
+        setStats({
+          completedStopsCount: parsedStats.completedStopsCount || 0,
+          completedSacksCount: parsedStats.completedSacksCount || 0,
+          collectedCashEur: parsedStats.collectedCashEur || 0,
+          deliveredItems: Array.isArray(parsedStats.deliveredItems)
+            ? parsedStats.deliveredItems
+            : [],
+        });
       }
     } catch (e) {
       console.warn("Error leyendo sesión previa:", e);
@@ -137,9 +159,23 @@ function RepartoContent() {
     if (!confirmingStop) return;
 
     const remaining = stops.filter((s) => s.id !== confirmingStop.id);
+    const shortId =
+      confirmingStop.id.replace(/^(eph-|ord-)/g, "").slice(-6) ||
+      String(confirmingStop.seq);
+    const cashEarned = confirmingStop.cashToCollectEur || 0;
+
     const newStats: CompletedStats = {
       completedStopsCount: stats.completedStopsCount + 1,
       completedSacksCount: stats.completedSacksCount + confirmingStop.sacks,
+      collectedCashEur: Number((stats.collectedCashEur + cashEarned).toFixed(2)),
+      deliveredItems: [
+        ...(stats.deliveredItems || []),
+        {
+          shortId,
+          sacks: confirmingStop.sacks,
+          cashCollectedEur: cashEarned,
+        },
+      ],
     };
 
     setStops(remaining);
@@ -247,10 +283,43 @@ function RepartoContent() {
   const currentStop = stops[0] || null;
   const upcomingStops = stops.slice(1);
   const totalRemainingSacks = stops.reduce((sum, s) => sum + s.sacks, 0);
+  const totalTripStops = stats.completedStopsCount + stops.length;
+  const totalTripSacks = stats.completedSacksCount + totalRemainingSacks;
+  const unloadedPercent =
+    totalTripSacks > 0
+      ? Math.round((stats.completedSacksCount / totalTripSacks) * 100)
+      : 0;
+  const pendingCashToCollectEur = stops.reduce(
+    (sum, s) => sum + (s.cashToCollectEur || 0),
+    0
+  );
+
+  // Token de Recibo de Cierre Zero-Cloud (/reparto -> /admin)
+  const returnReceiptToken = useMemo(() => {
+    if (!stats.deliveredItems || stats.deliveredItems.length === 0) return "";
+    return encodeReturnReceipt({
+      tripNum: payload?.tripNum || 1,
+      date: payload?.date || new Date().toISOString().split("T")[0],
+      closedAtTime: new Date().toTimeString().slice(0, 5),
+      deliveredItems: stats.deliveredItems,
+      totalSacksDelivered: stats.completedSacksCount,
+      totalCashCollectedEur: stats.collectedCashEur,
+    });
+  }, [stats, payload]);
+
+  const handleSendReturnReceiptWhatsApp = () => {
+    if (!returnReceiptToken) return;
+    const msg =
+      `✅ *Cierre de Viaje #${payload?.tripNum || 1} PelletGalicia*\n` +
+      `📦 Entregados: ${stats.completedSacksCount} sacos (${stats.completedStopsCount} paradas)\n` +
+      `💶 Efectivo cobrado en mano: ${stats.collectedCashEur.toFixed(2)} €\n\n` +
+      `🔑 Código de Conciliación Admin:\n${returnReceiptToken}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-white flex flex-col justify-between max-w-lg mx-auto font-sans select-none pb-6">
-      {/* 1. BARRA SUPERIOR FIJA: DETECTOR OFFLINE + PRIVACIDAD + RUTA COMPLETA */}
+      {/* 1. BARRA SUPERIOR FIJA: DETECTOR OFFLINE + BARRA DE PROGRESO + RUTA COMPLETA */}
       <header className="sticky top-0 z-40 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 p-4 space-y-3">
         {/* AVISO DE PROTECCIÓN CONTRA PÉRDIDA DE COBERTURA EN EL RURAL */}
         {!isOnline && (
@@ -288,16 +357,40 @@ function RepartoContent() {
           </div>
         </div>
 
-        {/* CONTADOR DE SACOS PENDIENTES */}
-        {stops.length > 0 && (
-          <div className="flex items-center justify-between text-xs bg-slate-900/90 px-3.5 py-2 rounded-2xl border border-slate-800">
-            <span className="text-slate-400 font-bold flex items-center gap-1.5">
-              <Package className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>Carga pendiente en furgón:</span>
-            </span>
-            <span className="font-mono font-black text-amber-400 text-sm">
-              {totalRemainingSacks} sacos ({totalRemainingSacks * 15} kg)
-            </span>
+        {/* BARRA DE PROGRESO VISUAL DEL VIAJE + EFECTIVO RECAUDADO */}
+        {totalTripStops > 0 && (
+          <div className="bg-slate-900/90 p-3 rounded-2xl border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between text-xs font-bold">
+              <span className="text-slate-200">
+                {stats.completedStopsCount} de {totalTripStops} paradas completadas
+              </span>
+              <span className="font-mono font-black text-amber-400">
+                {unloadedPercent}% descargado ({stats.completedSacksCount}/{totalTripSacks} sacos)
+              </span>
+            </div>
+            <div className="w-full h-2.5 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+              <div
+                className="h-full bg-gradient-to-r from-emerald-500 to-amber-400 transition-all duration-300"
+                style={{ width: `${Math.min(100, unloadedPercent)}%` }}
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] pt-0.5">
+              <span className="text-slate-400 flex items-center gap-1">
+                <Package className="w-3.5 h-3.5 text-amber-400" />
+                <span>En furgón: {totalRemainingSacks} sacos ({totalRemainingSacks * 15} kg)</span>
+              </span>
+              {(stats.collectedCashEur > 0 || pendingCashToCollectEur > 0) && (
+                <span className="font-mono font-black text-emerald-400">
+                  💶 Cobrado: {stats.collectedCashEur.toFixed(0)}€
+                  {pendingCashToCollectEur > 0 && (
+                    <span className="text-amber-300 ml-1">
+                      (Pend: {pendingCashToCollectEur.toFixed(0)}€)
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
           </div>
         )}
 
@@ -306,7 +399,7 @@ function RepartoContent() {
           <button
             type="button"
             onClick={handleOpenMultiStopRoute}
-            className="w-full flex items-center justify-center gap-2.5 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black text-sm shadow-xl shadow-blue-900/30 active:scale-[0.98] transition"
+            className="w-full min-h-[54px] flex items-center justify-center gap-2.5 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black text-sm shadow-xl shadow-blue-900/30 active:scale-[0.98] transition"
           >
             <Map className="w-5 h-5 shrink-0 text-amber-300" />
             <span>
@@ -341,7 +434,7 @@ function RepartoContent() {
             </div>
 
             {stats.completedStopsCount > 0 && (
-              <div className="p-4 bg-slate-950/80 rounded-2xl border border-slate-800 text-xs text-slate-300 space-y-2 text-left">
+              <div className="p-4 bg-slate-950/80 rounded-2xl border border-slate-800 text-xs text-slate-300 space-y-2.5 text-left">
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400">Clientes atendidos:</span>
                   <strong className="text-white font-mono text-sm">
@@ -354,6 +447,57 @@ function RepartoContent() {
                     {stats.completedSacksCount} sacos (
                     {stats.completedSacksCount * 15} kg)
                   </strong>
+                </div>
+                <div className="flex justify-between items-center pt-1 border-t border-slate-800">
+                  <span className="text-slate-300 font-bold">
+                    💶 Efectivo total recaudado:
+                  </span>
+                  <strong className="text-emerald-400 font-mono text-base font-black">
+                    {stats.collectedCashEur.toFixed(2)} €
+                  </strong>
+                </div>
+              </div>
+            )}
+
+            {/* RESUMEN DE CIERRE ZERO-CLOUD PARA ENVIAR AL ADMIN */}
+            {returnReceiptToken && (
+              <div className="p-4 bg-slate-950 rounded-2xl border-2 border-emerald-500/40 space-y-3 text-left">
+                <div className="text-xs font-black text-emerald-400 uppercase">
+                  📲 Liquidación Zero-Cloud (/reparto ➔ /admin)
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Envía este código anónimo al Administrador por WhatsApp para marcar automáticamente los pedidos como entregados y registrar el efectivo recaudado.
+                </p>
+                <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSendReturnReceiptWhatsApp}
+                    className="w-full min-h-[54px] flex items-center justify-center gap-2 py-3.5 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs sm:text-sm shadow-lg shadow-emerald-600/25 active:scale-[0.98] transition"
+                  >
+                    <MessageCircle className="w-5 h-5" />
+                    <span>Enviar Resumen de Cierre por WhatsApp</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(returnReceiptToken);
+                      setCopiedReceiptToken(true);
+                      setTimeout(() => setCopiedReceiptToken(false), 2500);
+                    }}
+                    className="w-full py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-mono font-bold text-xs border border-slate-700 flex items-center justify-center gap-1.5"
+                  >
+                    {copiedReceiptToken ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-400" />
+                        <span>¡Código PG1 copiado!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4 text-amber-400" />
+                        <span>Copiar Código de Cierre ({returnReceiptToken.slice(0, 14)}...)</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             )}
@@ -451,8 +595,19 @@ function RepartoContent() {
                 </div>
               </div>
 
+              {/* BOTÓN DE LLAMADA TELEFÓNICA DIRECTA EN 1 TOQUE (SI TIENE TELÉFONO) */}
+              {currentStop.phone && (
+                <a
+                  href={`tel:${currentStop.phone}`}
+                  className="w-full min-h-[56px] flex items-center justify-center gap-2.5 py-3.5 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 border-2 border-sky-500/50 text-sky-300 font-black text-sm sm:text-base shadow-lg active:scale-[0.98] transition"
+                >
+                  <Phone className="w-5 h-5 text-sky-400 shrink-0" />
+                  <span>📞 Llamar al Cliente ({currentStop.phone})</span>
+                </a>
+              )}
+
               {/* BOTÓN GIGANTE: IR A ESTE CLIENTE (GOOGLE MAPS) + BOTÓN COPIAR GPS OFFLINE */}
-              <div className="flex items-stretch gap-2.5">
+              <div className="flex items-stretch gap-3">
                 <button
                   type="button"
                   onClick={() =>
@@ -461,7 +616,7 @@ function RepartoContent() {
                       lng: currentStop.lng,
                     })
                   }
-                  className="flex-1 flex items-center justify-center gap-2.5 py-4 px-4 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white font-black text-sm sm:text-base shadow-xl shadow-sky-600/30 active:scale-[0.98] transition"
+                  className="flex-1 min-h-[56px] flex items-center justify-center gap-2.5 py-4 px-4 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white font-black text-sm sm:text-base shadow-xl shadow-sky-600/30 active:scale-[0.98] transition"
                 >
                   <Navigation className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" />
                   <span>📍 Ir en Google Maps</span>
@@ -471,7 +626,7 @@ function RepartoContent() {
                   type="button"
                   onClick={() => handleCopyGps(currentStop)}
                   title="Copiar coordenadas GPS al portapapeles para mapas offline"
-                  className={`px-4 py-4 rounded-2xl font-black text-xs border transition flex flex-col items-center justify-center gap-1 shrink-0 ${
+                  className={`min-h-[56px] px-4 py-4 rounded-2xl font-black text-xs border transition flex flex-col items-center justify-center gap-1 shrink-0 ${
                     copiedStopId === currentStop.id
                       ? "bg-emerald-600 border-emerald-400 text-white"
                       : "bg-slate-800 hover:bg-slate-700 border-slate-700 text-amber-300"
@@ -495,7 +650,7 @@ function RepartoContent() {
               <button
                 type="button"
                 onClick={() => setConfirmingStop(currentStop)}
-                className="w-full flex items-center justify-center gap-2.5 py-4 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-base shadow-xl shadow-emerald-600/25 active:scale-[0.98] transition"
+                className="w-full min-h-[56px] flex items-center justify-center gap-2.5 py-4 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-base shadow-xl shadow-emerald-600/25 active:scale-[0.98] transition"
               >
                 <CheckCircle2 className="w-6 h-6 shrink-0" />
                 <span>✅ Entrega Completada (Borrar)</span>

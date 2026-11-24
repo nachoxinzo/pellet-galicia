@@ -11,12 +11,18 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Order, WarehouseLocation } from "@/types/pellet";
+import { Coordinates, PendingOrder } from "@/types/pelletGalicia";
+
+export interface MapWarehouseLocation {
+  name: string;
+  address: string;
+  coordinates: Coordinates;
+}
 
 interface DeliveryRouteMapProps {
-  warehouse: WarehouseLocation;
-  pendingOrders: Order[];
-  selectedOrders?: Order[];
+  warehouse: MapWarehouseLocation;
+  pendingOrders: PendingOrder[];
+  selectedOrders?: PendingOrder[];
   onOrderClick?: (orderId: string) => void;
   osrmPolyline?: [number, number][]; // Polilínea real por carretera calculada con OSRM
   height?: string;
@@ -153,7 +159,7 @@ export default function DeliveryRouteMap({
       [warehouse.coordinates.lat, warehouse.coordinates.lng],
     ];
     pendingOrders.forEach((o) => {
-      list.push([o.client.coordinates.lat, o.client.coordinates.lng]);
+      list.push([o.customer.coordinates.lat, o.customer.coordinates.lng]);
     });
     return list;
   }, [warehouse, pendingOrders]);
@@ -165,7 +171,7 @@ export default function DeliveryRouteMap({
       [warehouse.coordinates.lat, warehouse.coordinates.lng],
     ];
     selectedOrders.forEach((ord) => {
-      pts.push([ord.client.coordinates.lat, ord.client.coordinates.lng]);
+      pts.push([ord.customer.coordinates.lat, ord.customer.coordinates.lng]);
     });
     pts.push([warehouse.coordinates.lat, warehouse.coordinates.lng]);
     return pts;
@@ -216,11 +222,15 @@ export default function DeliveryRouteMap({
           const sequenceIndex = isSelected
             ? selectedOrders.findIndex((o) => o.id === order.id) + 1
             : undefined;
+          const notes = order.orderNotes || order.customer.internalNotes || "";
 
           return (
             <Marker
               key={order.id}
-              position={[order.client.coordinates.lat, order.client.coordinates.lng]}
+              position={[
+                order.customer.coordinates.lat,
+                order.customer.coordinates.lng,
+              ]}
               icon={createOrderPinIcon(
                 order.totalWeightKg,
                 isSelected,
@@ -236,25 +246,28 @@ export default function DeliveryRouteMap({
                 <div className="text-xs p-1 font-sans space-y-1.5">
                   <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-1">
                     <span className="font-bold text-slate-900 text-sm">
-                      {order.client.name}
+                      {order.customer.name}
                     </span>
                     <span className="font-extrabold px-1.5 py-0.5 rounded text-[11px] bg-slate-900 text-amber-400">
-                      {order.totalWeightKg.toLocaleString("es-ES")} kg
+                      {order.sacks} sacos ({order.totalWeightKg.toLocaleString("es-ES")} kg)
                     </span>
                   </div>
                   <p className="text-slate-600 text-[11px]">
-                    📍 {order.client.address}
+                    📍 {order.customer.village}
                   </p>
-                  <p className="text-slate-600 text-[11px]">
-                    📦 {order.pallets} palés ({order.pallets * 1050} kg) +{" "}
-                    {order.looseSacks} sacos ({order.looseSacks * 15} kg)
-                  </p>
-                  <div className="text-[11px] text-sky-700 font-medium">
-                    Horario: {order.client.preferredTimeWindow}
-                  </div>
-                  {order.client.unloadingNotes && (
+                  {order.customer.phone && (
+                    <p className="text-slate-600 text-[11px] font-mono">
+                      📞 {order.customer.phone}
+                    </p>
+                  )}
+                  {order.priority === "Urgente" && (
+                    <div className="text-[10px] font-black text-rose-700 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-200 inline-block">
+                      🚨 Entrega Urgente
+                    </div>
+                  )}
+                  {notes && (
                     <div className="p-1 rounded bg-amber-50 border border-amber-200 text-amber-900 text-[10px]">
-                      ⚠️ {order.client.unloadingNotes}
+                      ⚠️ {notes}
                     </div>
                   )}
                   {onOrderClick && (

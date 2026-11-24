@@ -4,6 +4,8 @@ import {
   EphemeralStop,
   UltraCompactStopWire,
   UltraCompactTripWire,
+  UltraCompactReturnReceiptWire,
+  DecodedReturnReceipt,
   Coordinates,
   PELLET_GALICIA_RULES,
 } from "@/types/pelletGalicia";
@@ -83,6 +85,7 @@ export function encodeTripPayload(payload: EphemeralTripPayload): string {
   const compactStops: UltraCompactStopWire[] = payload.stops.map((st, idx) => {
     const shortId =
       st.id.replace(/^(eph-|ord-)/g, "").slice(-6) || String(idx + 1);
+    const cleanPhone = st.phone ? st.phone.replace(/\s+/g, "").slice(0, 18) : "";
     return {
       i: shortId,
       n: st.name.trim(),
@@ -92,6 +95,7 @@ export function encodeTripPayload(payload: EphemeralTripPayload): string {
       s: st.sacks,
       c: st.cashToCollectEur ? Number(st.cashToCollectEur.toFixed(2)) : 0,
       t: st.tags || "",
+      ...(cleanPhone ? { ph: cleanPhone } : {}),
     };
   });
 
@@ -178,6 +182,7 @@ export function decodeTripPayload(encoded: string): EphemeralTripPayload | null 
               Math.min(50_000, Number(item.c) || 0)
             ),
             tags: String(item.t || "").slice(0, 160),
+            phone: item.ph ? String(item.ph).slice(0, 20) : undefined,
           };
         })
         .filter((s): s is EphemeralStop => s !== null);
@@ -295,4 +300,80 @@ export function buildGoogleMapsMultiStopUrl(
  */
 export function buildGoogleMapsSingleClientUrl(coords: Coordinates): string {
   return `https://www.google.com/maps/dir/?api=1&destination=${coords.lat.toFixed(6)},${coords.lng.toFixed(6)}&travelmode=driving`;
+}
+
+/**
+ * Codifica un recibo de cierre Zero-Cloud (/reparto -> /admin) con prefijo PG1-
+ * No incluye ningún dato personal ni coordenadas GPS, solo IDs cortos de 6 caracteres, sacos y efectivo.
+ */
+export function encodeReturnReceipt(receipt: DecodedReturnReceipt): string {
+  const wire: UltraCompactReturnReceiptWire = {
+    r: 1,
+    k: Math.max(1, Math.min(99, receipt.tripNum || 1)),
+    d: receipt.date || new Date().toISOString().split("T")[0],
+    t: receipt.closedAtTime || new Date().toTimeString().slice(0, 5),
+    e: (receipt.deliveredItems || []).slice(0, MAX_STOPS_PER_TRIP).map((it) => ({
+      i: String(it.shortId || "").slice(0, 12),
+      s: Math.max(1, Math.min(500, Math.floor(Number(it.sacks) || 1))),
+      c: Math.max(0, Math.min(50_000, Number((it.cashCollectedEur || 0).toFixed(2)))),
+    })),
+  };
+
+  const compressed = LZString.compressToEncodedURIComponent(JSON.stringify(wire));
+  return `PG1-${compressed}`;
+}
+
+/**
+ * Decodifica un recibo de cierre Zero-Cloud (acepta el token PG1-... o un mensaje completo de WhatsApp que lo contenga).
+ */
+export function decodeReturnReceipt(
+  encodedOrText: string
+): DecodedReturnReceipt | null {
+  if (!encodedOrText || encodedOrText.length > MAX_ENCODED_URL_LENGTH) return null;
+
+  try {
+    const tokenMatch = encodedOrText.match(/PG1-([A-Za-z0-9+\-$_]+)/);
+    const rawCompressed = tokenMatch
+      ? tokenMatch[1]
+      : encodedOrText.trim().replace(/^PG1-/, "");
+
+    if (!rawCompressed) return null;
+
+    let jsonStr = LZString.decompressFromEncodedURIComponent(rawCompressed);
+    if (!jsonStr) {
+      jsonStr = LZString.decompressFromEncodedURIComponent(
+        decodeURIComponent(rawCompressed)
+      );
+    }
+    if (!jsonStr || jsonStr.length > MAX_DECOMPRESSED_JSON_LENGTH) return null;
+
+    const parsed = JSON.parse(jsonStr) as UltraCompactReturnReceiptWire;
+    if (!parsed || parsed.r !== 1 || !Array.isArray(parsed.e)) return null;
+
+    const deliveredItems = parsed.e
+      .slice(0, MAX_STOPS_PER_TRIP)
+      .map((it) => ({
+        shortId: String(it.i || "").slice(0, 12),
+        sacks: Math.max(1, Math.min(500, Math.floor(Number(it.s) || 1))),
+        cashCollectedEur: Math.max(0, Math.min(50_000, Number(it.c) || 0)),
+      }))
+      .filter((it) => it.shortId.length > 0);
+
+    const totalSacksDelivered = deliveredItems.reduce((s, it) => s + it.sacks, 0);
+    const totalCashCollectedEur = Number(
+      deliveredItems.reduce((s, it) => s + it.cashCollectedEur, 0).toFixed(2)
+    );
+
+    return {
+      tripNum: Math.max(1, Math.min(99, Number(parsed.k) || 1)),
+      date: String(parsed.d || new Date().toISOString().split("T")[0]).slice(0, 20),
+      closedAtTime: String(parsed.t || "--:--").slice(0, 10),
+      deliveredItems,
+      totalSacksDelivered,
+      totalCashCollectedEur,
+    };
+  } catch (err) {
+    console.error("Error decodificando recibo de cierre:", err);
+    return null;
+  }
 }

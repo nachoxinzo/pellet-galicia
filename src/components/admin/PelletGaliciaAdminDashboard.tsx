@@ -1,7 +1,13 @@
 "use client";
 
 import React, { useState, useEffect, useMemo } from "react";
-import { Customer, PendingOrder, VanConfig } from "@/types/pelletGalicia";
+import {
+  Customer,
+  PendingOrder,
+  OrderPriority,
+  DecodedReturnReceipt,
+  VanConfig,
+} from "@/types/pelletGalicia";
 import { galiciaStorage, BackupAlertStatus } from "@/services/galiciaStorage";
 import { estimateRoadDistanceKm } from "@/utils/galiciaRoutingEngine";
 import CustomerOrdersTab from "@/components/admin/CustomerOrdersTab";
@@ -19,6 +25,8 @@ import {
   Coins,
   Fuel,
   Scale,
+  TrendingUp,
+  CheckCircle2,
 } from "lucide-react";
 
 type AdminActiveTab = "orders" | "planner" | "config";
@@ -35,6 +43,14 @@ export default function PelletGaliciaAdminDashboard() {
     needsBackupAlert: false,
   });
   const [isLoaded, setIsLoaded] = useState(false);
+  const [adminToast, setAdminToast] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setAdminToast(msg);
+    setTimeout(() => {
+      setAdminToast((prev) => (prev === msg ? null : prev));
+    }, 4000);
+  };
 
   const refreshAll = () => {
     setCustomers(galiciaStorage.getCustomers());
@@ -48,6 +64,24 @@ export default function PelletGaliciaAdminDashboard() {
     setIsLoaded(true);
   }, []);
 
+  // Atajos de teclado rápidos Alt+1, Alt+2, Alt+3
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.key === "1") {
+        e.preventDefault();
+        setActiveTab("orders");
+      } else if (e.altKey && e.key === "2") {
+        e.preventDefault();
+        setActiveTab("planner");
+      } else if (e.altKey && e.key === "3") {
+        e.preventDefault();
+        setActiveTab("config");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   const handleSaveCustomer = (data: any) => {
     const saved = galiciaStorage.saveCustomer(data);
     refreshAll();
@@ -57,10 +91,16 @@ export default function PelletGaliciaAdminDashboard() {
   const handleDeleteCustomer = (id: string) => {
     galiciaStorage.deleteCustomer(id);
     refreshAll();
+    showToast("🗑️ Cliente eliminado de la cartera local");
   };
 
-  const handleSaveOrder = (customerId: string, sacks: number, notes?: string) => {
-    galiciaStorage.saveOrder(customerId, sacks, notes);
+  const handleSaveOrder = (
+    customerId: string,
+    sacks: number,
+    notes?: string,
+    priority: OrderPriority = "Normal"
+  ) => {
+    galiciaStorage.saveOrder(customerId, sacks, notes, priority);
     refreshAll();
   };
 
@@ -69,6 +109,7 @@ export default function PelletGaliciaAdminDashboard() {
     updates: {
       sacks?: number;
       orderNotes?: string;
+      priority?: OrderPriority;
       status?: PendingOrder["status"];
     }
   ) => {
@@ -98,6 +139,24 @@ export default function PelletGaliciaAdminDashboard() {
   const handleMarkDelivered = (orderIds: string[]) => {
     galiciaStorage.markOrdersAsDelivered(orderIds);
     refreshAll();
+    showToast(`✅ ${orderIds.length} paradas marcadas como entregadas`);
+  };
+
+  const handleMarkInDelivery = (orderIds: string[]) => {
+    galiciaStorage.markOrdersInDelivery(orderIds);
+    refreshAll();
+    showToast(`🚀 Viaje despachado (${orderIds.length} pedidos en estado 'En Reparto')`);
+  };
+
+  const handleReconcileReturnReceipt = (receipt: DecodedReturnReceipt) => {
+    const res = galiciaStorage.reconcileReturnReceipt(receipt);
+    refreshAll();
+    if (res.matchedOrderIds.length > 0) {
+      showToast(
+        `📥 Cierre conciliado: ${res.matchedOrderIds.length} entregas (${res.totalSacksUpdated} sacos · ${res.totalCashRecordedEur.toFixed(2)} € cobrados)`
+      );
+    }
+    return res;
   };
 
   const handleSaveConfig = (partial: Partial<VanConfig>) => {
@@ -119,12 +178,15 @@ export default function PelletGaliciaAdminDashboard() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       refreshAll();
+      showToast("💾 Copia de seguridad JSON descargada en tu equipo");
     } catch (err) {
       console.error("Error descargando backup rápido:", err);
     }
   };
 
-  const pendingOrders = orders.filter((o) => o.status === "Pendiente");
+  const pendingOrders = orders.filter(
+    (o) => o.status === "Pendiente" || o.status === "En Reparto"
+  );
   const deliveredOrders = orders.filter((o) => o.status === "Completado");
 
   // 5. Métricas de Resumen de Campaña
@@ -158,6 +220,21 @@ export default function PelletGaliciaAdminDashboard() {
     });
 
     const estFuelCostEur = estFuelLiters * dieselPrice;
+    const netMarginDeliveredEur = Number(
+      (deliveredRevenueEur - estFuelCostEur).toFixed(2)
+    );
+    const netMarginTotalCampaignEur = Number(
+      (totalCampaignRevenueEur - estFuelCostEur).toFixed(2)
+    );
+    const marginPercent =
+      totalCampaignRevenueEur > 0
+        ? Math.max(
+            0,
+            Math.round(
+              (netMarginTotalCampaignEur / totalCampaignRevenueEur) * 100
+            )
+          )
+        : 0;
 
     return {
       deliveredSacks,
@@ -168,6 +245,9 @@ export default function PelletGaliciaAdminDashboard() {
       totalCampaignRevenueEur: Number(totalCampaignRevenueEur.toFixed(2)),
       estFuelLiters: Number(estFuelLiters.toFixed(1)),
       estFuelCostEur: Number(estFuelCostEur.toFixed(2)),
+      netMarginDeliveredEur,
+      netMarginTotalCampaignEur,
+      marginPercent,
       pricePerSack,
     };
   }, [orders, deliveredOrders, pendingOrders, config]);
@@ -223,9 +303,9 @@ export default function PelletGaliciaAdminDashboard() {
 
       {/* CUERPO PRINCIPAL CON 3 PESTAÑAS */}
       <main className="max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-5 flex-1">
-        {/* 5. BARRA DE RESUMEN DE CAMPAÑA */}
+        {/* 5. BARRA DE RESUMEN DE CAMPAÑA (4 KPIs INCLUYENDO MARGEN NETO) */}
         {isLoaded && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-900/90 border border-slate-800 p-3.5 rounded-3xl shadow-lg print:hidden">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-900/90 border border-slate-800 p-3.5 rounded-3xl shadow-lg print:hidden">
             {/* Métrica 1: Total Sacos Entregados (y Toneladas) */}
             <div className="flex items-center gap-3 p-2.5 rounded-2xl bg-slate-950/80 border border-slate-800/90">
               <div className="p-2.5 rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0">
@@ -233,7 +313,7 @@ export default function PelletGaliciaAdminDashboard() {
               </div>
               <div className="min-w-0">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Total Sacos Entregados (Toneladas)
+                  Total Sacos Entregados
                 </span>
                 <div className="text-sm font-black text-white truncate">
                   {campaignSummary.deliveredSacks} sacos{" "}
@@ -241,8 +321,8 @@ export default function PelletGaliciaAdminDashboard() {
                     ({campaignSummary.deliveredTons} t)
                   </span>
                 </div>
-                <span className="text-[10px] text-slate-400 block">
-                  En cola + entregados: {campaignSummary.totalCampaignSacks} sacos (
+                <span className="text-[10px] text-slate-400 block truncate">
+                  En cola + entregados: {campaignSummary.totalCampaignSacks} (
                   {campaignSummary.totalCampaignTons} t)
                 </span>
               </div>
@@ -255,7 +335,7 @@ export default function PelletGaliciaAdminDashboard() {
               </div>
               <div className="min-w-0">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Ingresos Totales de Campaña
+                  Ingresos Brutos Campaña
                 </span>
                 <div className="text-sm font-black text-emerald-400 truncate">
                   {campaignSummary.deliveredRevenueEur.toLocaleString("es-ES", {
@@ -266,8 +346,8 @@ export default function PelletGaliciaAdminDashboard() {
                     entregados
                   </span>
                 </div>
-                <span className="text-[10px] text-slate-400 block">
-                  Total c/ pendientes:{" "}
+                <span className="text-[10px] text-slate-400 block truncate">
+                  Total c/ cola:{" "}
                   {campaignSummary.totalCampaignRevenueEur.toLocaleString("es-ES", {
                     minimumFractionDigits: 2,
                   })}{" "}
@@ -283,19 +363,49 @@ export default function PelletGaliciaAdminDashboard() {
               </div>
               <div className="min-w-0">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Coste de Combustible Estimado
+                  Coste Gasoil Estimado
                 </span>
                 <div className="text-sm font-black text-sky-400 truncate">
                   {campaignSummary.estFuelCostEur.toFixed(2)} €{" "}
                   <span className="text-xs text-slate-300 font-mono">
-                    (~{campaignSummary.estFuelLiters} L diésel)
+                    (~{campaignSummary.estFuelLiters} L)
                   </span>
                 </div>
-                <span className="text-[10px] text-slate-400 block">
-                  Clientes en cartera: {customers.length} • Backup:{" "}
+                <span className="text-[10px] text-slate-400 block truncate">
+                  Cartera: {customers.length} cli. • Backup:{" "}
                   {backupStatus.lastBackupAt
                     ? `hace ${backupStatus.daysSinceBackup ?? 0}d`
                     : "pendiente"}
+                </span>
+              </div>
+            </div>
+
+            {/* Métrica 4: Margen Neto Estimado (Ingresos - Gasoil) */}
+            <div className="flex items-center gap-3 p-2.5 rounded-2xl bg-slate-950/80 border border-emerald-500/30">
+              <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
+                <TrendingUp className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Margen Neto Est.
+                  </span>
+                  {campaignSummary.marginPercent > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 font-mono text-[9px] font-black">
+                      {campaignSummary.marginPercent}%
+                    </span>
+                  )}
+                </div>
+                <div className="text-sm font-black text-emerald-400 truncate">
+                  {campaignSummary.netMarginTotalCampaignEur.toLocaleString(
+                    "es-ES",
+                    { minimumFractionDigits: 2 }
+                  )}{" "}
+                  €
+                </div>
+                <span className="text-[10px] text-slate-400 block truncate">
+                  Ya entregado neto:{" "}
+                  {campaignSummary.netMarginDeliveredEur.toFixed(2)} €
                 </span>
               </div>
             </div>
@@ -304,7 +414,7 @@ export default function PelletGaliciaAdminDashboard() {
 
         {/* NAVEGACIÓN ENTRE LAS 3 PESTAÑAS */}
         <div className="flex items-center justify-between border-b border-slate-800 pb-3 print:hidden">
-          <div className="flex rounded-2xl bg-slate-900 border border-slate-800 p-1">
+          <div className="flex flex-wrap rounded-2xl bg-slate-900 border border-slate-800 p-1 gap-1">
             {/* Pestaña 1: Pedidos y Clientes */}
             <button
               type="button"
@@ -320,6 +430,9 @@ export default function PelletGaliciaAdminDashboard() {
               <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300">
                 {pendingOrders.length}
               </span>
+              <kbd className="hidden md:inline-block px-1.5 py-0.5 text-[9px] rounded bg-slate-950/60 text-slate-300 font-mono">
+                Alt+1
+              </kbd>
             </button>
 
             {/* Pestaña 2: Planificador de Rutas */}
@@ -337,6 +450,9 @@ export default function PelletGaliciaAdminDashboard() {
               <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-slate-800 text-amber-400 font-bold">
                 OSRM + Satélite
               </span>
+              <kbd className="hidden md:inline-block px-1.5 py-0.5 text-[9px] rounded bg-slate-950/60 text-slate-300 font-mono">
+                Alt+2
+              </kbd>
             </button>
 
             {/* Pestaña 3: Configuración y Backup */}
@@ -351,6 +467,9 @@ export default function PelletGaliciaAdminDashboard() {
             >
               <Settings className="w-4 h-4" />
               <span>Configuración y Backup</span>
+              <kbd className="hidden md:inline-block px-1.5 py-0.5 text-[9px] rounded bg-slate-950/60 text-slate-300 font-mono">
+                Alt+3
+              </kbd>
             </button>
           </div>
         </div>
@@ -382,6 +501,8 @@ export default function PelletGaliciaAdminDashboard() {
                 orders={orders}
                 config={config}
                 onMarkDelivered={handleMarkDelivered}
+                onMarkInDelivery={handleMarkInDelivery}
+                onReconcileReturnReceipt={handleReconcileReturnReceipt}
               />
             )}
 
@@ -395,6 +516,14 @@ export default function PelletGaliciaAdminDashboard() {
           </>
         )}
       </main>
+
+      {/* TOAST NO INTRUSIVO FLOTANTE */}
+      {adminToast && (
+        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 border-2 border-emerald-500/70 text-emerald-300 px-4 py-3 rounded-2xl shadow-2xl text-xs font-black flex items-center gap-2.5 animate-in fade-in slide-in-from-bottom-4 duration-200 print:hidden">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{adminToast}</span>
+        </div>
+      )}
 
       {/* PIE DE PÁGINA */}
       <footer className="border-t border-slate-900 px-6 py-4 text-center text-[11px] text-slate-500">

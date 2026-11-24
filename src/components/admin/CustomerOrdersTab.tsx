@@ -2,7 +2,8 @@
 
 import React, { useState, useMemo, useEffect } from "react";
 import dynamic from "next/dynamic";
-import { Customer, PendingOrder } from "@/types/pelletGalicia";
+import { Customer, PendingOrder, OrderPriority } from "@/types/pelletGalicia";
+import { extractCashAndTagsFromNotes } from "@/utils/galiciaUrlCodec";
 import {
   Package,
   Plus,
@@ -30,6 +31,9 @@ import {
   Phone,
   Filter,
   ArrowUpDown,
+  RotateCcw,
+  Flame,
+  Banknote,
 } from "lucide-react";
 import {
   searchGoogleMapsLive,
@@ -94,12 +98,18 @@ interface CustomerOrdersTabProps {
     customer: Omit<Customer, "id" | "createdAt" | "updatedAt"> & { id?: string }
   ) => Customer | void;
   onDeleteCustomer: (id: string) => void;
-  onSaveOrder: (customerId: string, sacks: number, notes?: string) => void;
+  onSaveOrder: (
+    customerId: string,
+    sacks: number,
+    notes?: string,
+    priority?: OrderPriority
+  ) => void;
   onUpdateOrder: (
     orderId: string,
     updates: {
       sacks?: number;
       orderNotes?: string;
+      priority?: OrderPriority;
       status?: PendingOrder["status"];
     }
   ) => void;
@@ -165,6 +175,17 @@ export default function CustomerOrdersTab({
   // Pedido
   const [sacks, setSacks] = useState<number>(30);
   const [orderNotes, setOrderNotes] = useState("");
+  const [orderPriority, setOrderPriority] = useState<OrderPriority>("Normal");
+
+  // Filtros de la Cola de Pedidos y confirmación inline de borrado de cliente
+  const [queueStatusFilter, setQueueStatusFilter] = useState<
+    "ACTIVOS" | "Completado" | "ALL"
+  >("ACTIVOS");
+  const [queueSearchQuery, setQueueSearchQuery] = useState("");
+  const [onlyCashPendingFilter, setOnlyCashPendingFilter] = useState(false);
+  const [confirmDeleteCustomerId, setConfirmDeleteCustomerId] = useState<
+    string | null
+  >(null);
 
   // BUSCADOR DIRECTO DE GOOGLE MAPS CON AUTOCOMPLETADO EN TIEMPO REAL
   const [googleQuery, setGoogleQuery] = useState("");
@@ -488,6 +509,7 @@ export default function CustomerOrdersTab({
     setInternalNotes("");
     setSacks(30);
     setOrderNotes("");
+    setOrderPriority("Normal");
     setGoogleQuery("");
     setGoogleResults([]);
     setConfirmedStatus(null);
@@ -508,6 +530,7 @@ export default function CustomerOrdersTab({
     setInternalNotes(ord.customer.internalNotes || "");
     setSacks(ord.sacks);
     setOrderNotes(ord.orderNotes || "");
+    setOrderPriority(ord.priority || "Normal");
     setGoogleQuery("");
     setShowGoogleDropdown(false);
     setShowCustomerDropdown(false);
@@ -564,6 +587,7 @@ export default function CustomerOrdersTab({
       onUpdateOrder(editingOrderId, {
         sacks,
         orderNotes: combinedNotes,
+        priority: orderPriority,
       });
       const msg = `💾 ¡Cambios guardados con éxito para ${name} (${sacks} sacos)!`;
       setQuickOrderFeedback(msg);
@@ -574,7 +598,7 @@ export default function CustomerOrdersTab({
     } else {
       // 2. MODO CREACIÓN: Registrar nuevo pedido pendiente
       if (targetCustId) {
-        onSaveOrder(targetCustId, sacks, combinedNotes);
+        onSaveOrder(targetCustId, sacks, combinedNotes, orderPriority);
         const msg = `✅ Pedido de ${name} (${sacks} sacos · ${
           sacks * 15
         } kg) añadido a la cola`;
@@ -587,11 +611,57 @@ export default function CustomerOrdersTab({
     }
   };
 
-  const pendingOrders = orders.filter((o) => o.status === "Pendiente");
+  const pendingOrders = orders.filter(
+    (o) => o.status === "Pendiente" || o.status === "En Reparto"
+  );
+  const completedOrders = orders.filter((o) => o.status === "Completado");
   const totalPendingSacks = pendingOrders.reduce((sum, o) => sum + o.sacks, 0);
   const vanOccupancyPercent = Math.round(
     (totalPendingSacks / vanCapacitySacks) * 100
   );
+
+  // Pedidos filtrados en la columna derecha (Cola de Pedidos)
+  const filteredQueueOrders = useMemo(() => {
+    const q = normalizeGaliciaText(queueSearchQuery);
+    return orders.filter((ord) => {
+      if (
+        queueStatusFilter === "ACTIVOS" &&
+        ord.status !== "Pendiente" &&
+        ord.status !== "En Reparto"
+      ) {
+        return false;
+      }
+      if (queueStatusFilter === "Completado" && ord.status !== "Completado") {
+        return false;
+      }
+      if (onlyCashPendingFilter) {
+        const { cashToCollectEur } = extractCashAndTagsFromNotes(
+          ord.orderNotes || ord.customer.internalNotes
+        );
+        if (cashToCollectEur <= 0 && !ord.cashCollectedEur) return false;
+      }
+      if (q) {
+        const matchName = normalizeGaliciaText(ord.customer.name).includes(q);
+        const matchVillage = normalizeGaliciaText(
+          ord.customer.village
+        ).includes(q);
+        const matchNotes = normalizeGaliciaText(
+          ord.orderNotes || ord.customer.internalNotes || ""
+        ).includes(q);
+        return matchName || matchVillage || matchNotes;
+      }
+      return true;
+    });
+  }, [orders, queueStatusFilter, queueSearchQuery, onlyCashPendingFilter]);
+
+  const handleAppendNoteChip = (chipText: string) => {
+    setOrderNotes((prev) => {
+      const clean = prev.trim();
+      if (!clean) return chipText;
+      if (clean.toLowerCase().includes(chipText.toLowerCase())) return clean;
+      return `${clean} · ${chipText}`;
+    });
+  };
 
   return (
     <div className="space-y-6">
@@ -886,22 +956,36 @@ export default function CustomerOrdersTab({
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
 
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  `¿Eliminar a "${c.name}" de la Cartera de Clientes Habituales?`
-                                )
-                              ) {
-                                onDeleteCustomer(c.id);
-                              }
-                            }}
-                            title="Eliminar cliente de la cartera"
-                            className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-red-400 border border-slate-700 transition"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {confirmDeleteCustomerId === c.id ? (
+                            <div className="flex items-center gap-1 bg-red-950/80 border border-red-500/60 px-2 py-1 rounded-xl">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onDeleteCustomer(c.id);
+                                  setConfirmDeleteCustomerId(null);
+                                }}
+                                className="text-[10px] font-black text-red-300 hover:text-white px-1.5 py-0.5 rounded bg-red-600"
+                              >
+                                Sí, borrar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteCustomerId(null)}
+                                className="text-[10px] font-bold text-slate-300 hover:text-white px-1"
+                              >
+                                No
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteCustomerId(c.id)}
+                              title="Eliminar cliente de la cartera"
+                              className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-red-400 border border-slate-700 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1484,10 +1568,40 @@ export default function CustomerOrdersTab({
             </div>
           </div>
 
-          <div>
-            <label className="block text-[11px] font-bold text-slate-300 mb-1">
-              Notas de Descarga / Observaciones Internas
-            </label>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-[11px] font-bold text-slate-300">
+                Notas de Descarga / Cobro en Efectivo / Alertas
+              </label>
+
+              {/* Selector de Prioridad del Pedido: Normal vs Urgente */}
+              <div className="flex items-center gap-1 bg-slate-950 p-0.5 rounded-xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setOrderPriority("Normal")}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition ${
+                    orderPriority === "Normal"
+                      ? "bg-slate-800 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Prioridad Normal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOrderPriority("Urgente")}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition flex items-center gap-1 ${
+                    orderPriority === "Urgente"
+                      ? "bg-rose-600 text-white shadow"
+                      : "text-rose-400/70 hover:text-rose-300"
+                  }`}
+                >
+                  <Flame className="w-3 h-3" />
+                  <span>🚨 Urgente (Viaje #1)</span>
+                </button>
+              </div>
+            </div>
+
             <input
               type="text"
               placeholder="Ej. Dejar en el cobertizo, perro en finca, cobrar 210€ en efectivo..."
@@ -1495,6 +1609,29 @@ export default function CustomerOrdersTab({
               onChange={(e) => setOrderNotes(e.target.value)}
               className="w-full px-3 py-2 text-xs bg-slate-800 border border-slate-700 rounded-xl text-white outline-none focus:border-amber-500"
             />
+
+            {/* Chips rápidos de inserción en 1 clic */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <span className="text-[10px] text-slate-400 font-bold mr-1">
+                + Añadir en 1 clic:
+              </span>
+              {[
+                "🐕 Perro en finca",
+                "🛞 Llevar carretilla",
+                "🏠 Dejar en alpendre",
+                "📞 Llamar al llegar",
+                `💶 Cobrar ${(sacks * 4.5).toFixed(0)}€ en efectivo`,
+              ].map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => handleAppendNoteChip(chip)}
+                  className="px-2 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-[10px] font-bold text-slate-300 hover:text-amber-300 transition"
+                >
+                  + {chip}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* BOTONES DE ACCIÓN: GUARDAR CAMBIOS (EDICIÓN) O REGISTRAR PEDIDO */}
@@ -1530,17 +1667,91 @@ export default function CustomerOrdersTab({
         </form>
       </div>
 
-      {/* LISTADO DE PEDIDOS PENDIENTES CON EDICIÓN Y AJUSTE RÁPIDO DE SACOS */}
+      {/* LISTADO DE PEDIDOS CON FILTROS RÁPIDOS, BUSCADOR Y AJUSTE DE SACOS */}
       <div className="lg:col-span-5 space-y-4">
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-3xl shadow-xl space-y-4">
           <div className="space-y-3 border-b border-slate-800 pb-3">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-black uppercase tracking-wider text-white">
-                Pedidos en Cola ({pendingOrders.length})
+                Cola de Pedidos ({filteredQueueOrders.length})
               </h3>
               <span className="text-xs text-amber-400 font-bold">
-                Total: {totalPendingSacks} sacos ({totalPendingSacks * 15} kg)
+                Activos: {totalPendingSacks} sacos ({totalPendingSacks * 15} kg)
               </span>
+            </div>
+
+            {/* Segmented Control: Activos (Pendientes + En Reparto) | Completados | Todos */}
+            <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={() => setQueueStatusFilter("ACTIVOS")}
+                className={`py-1.5 px-2 rounded-xl transition ${
+                  queueStatusFilter === "ACTIVOS"
+                    ? "bg-amber-500 text-slate-950 font-black shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Activos ({pendingOrders.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setQueueStatusFilter("Completado")}
+                className={`py-1.5 px-2 rounded-xl transition ${
+                  queueStatusFilter === "Completado"
+                    ? "bg-emerald-600 text-white font-black shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Entregados ({completedOrders.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setQueueStatusFilter("ALL")}
+                className={`py-1.5 px-2 rounded-xl transition ${
+                  queueStatusFilter === "ALL"
+                    ? "bg-slate-800 text-white font-black shadow"
+                    : "text-slate-400 hover:text-white"
+                }`}
+              >
+                Todos ({orders.length})
+              </button>
+            </div>
+
+            {/* Buscador instantáneo en la cola + Toggle Solo con cobro */}
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Filtrar cola por cliente, aldea o nota..."
+                  value={queueSearchQuery}
+                  onChange={(e) => setQueueSearchQuery(e.target.value)}
+                  className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-amber-500"
+                />
+                {queueSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setQueueSearchQuery("")}
+                    className="absolute right-2.5 top-2 text-slate-400 hover:text-white text-xs"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOnlyCashPendingFilter((p) => !p)}
+                className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black border transition flex items-center gap-1 shrink-0 ${
+                  onlyCashPendingFilter
+                    ? "bg-emerald-500/20 border-emerald-500/60 text-emerald-300"
+                    : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                }`}
+                title="Filtrar solo pedidos con cobro en efectivo pendiente"
+              >
+                <Banknote className="w-3.5 h-3.5" />
+                <span>💶 Con cobro</span>
+              </button>
             </div>
 
             {/* Barra de ocupación del furgón */}
@@ -1583,20 +1794,25 @@ export default function CustomerOrdersTab({
             </div>
           </div>
 
-          {pendingOrders.length === 0 ? (
+          {filteredQueueOrders.length === 0 ? (
             <div className="p-8 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl space-y-1">
               <p className="font-bold text-slate-400">
-                No hay pedidos pendientes
+                No hay pedidos en esta vista
               </p>
               <p className="text-[11px]">
-                Utiliza el formulario de la izquierda con el buscador de Google Maps para registrar a tus
-                clientes y pedidos.
+                Utiliza el formulario de la izquierda o cambia el filtro superior.
               </p>
             </div>
           ) : (
             <div className="space-y-3 max-h-[660px] overflow-y-auto pr-1">
-              {pendingOrders.map((ord, i) => {
+              {filteredQueueOrders.map((ord, i) => {
                 const isEditing = editingOrderId === ord.id;
+                const isCompleted = ord.status === "Completado";
+                const isInDelivery = ord.status === "En Reparto";
+                const isUrgent = ord.priority === "Urgente";
+                const { cashToCollectEur } = extractCashAndTagsFromNotes(
+                  ord.orderNotes || ord.customer.internalNotes
+                );
 
                 return (
                   <div
@@ -1604,17 +1820,38 @@ export default function CustomerOrdersTab({
                     className={`p-4 rounded-2xl transition flex items-start justify-between gap-3 text-xs border ${
                       isEditing
                         ? "bg-amber-500/10 border-amber-400 ring-2 ring-amber-400/80 shadow-lg shadow-amber-500/10"
+                        : isUrgent && !isCompleted
+                        ? "bg-rose-950/20 border-rose-500/50 hover:border-rose-400"
+                        : isInDelivery
+                        ? "bg-sky-950/25 border-sky-500/50"
+                        : isCompleted
+                        ? "bg-slate-900/60 border-slate-800 opacity-75"
                         : "bg-slate-800/80 border-slate-700/80 hover:border-slate-600"
                     }`}
                   >
                     <div className="space-y-1.5 flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <span className="w-5 h-5 rounded-lg bg-slate-900 font-bold flex items-center justify-center text-[10px] text-slate-400 shrink-0">
                           {i + 1}
                         </span>
                         <span className="font-extrabold text-white text-sm truncate">
                           {ord.customer.name}
                         </span>
+                        {isUrgent && (
+                          <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-rose-600 text-white shrink-0">
+                            🚨 Urgente
+                          </span>
+                        )}
+                        {isInDelivery && (
+                          <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/40 shrink-0">
+                            🚛 En Reparto
+                          </span>
+                        )}
+                        {isCompleted && (
+                          <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
+                            ✓ Entregado
+                          </span>
+                        )}
                         {isEditing && (
                           <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-amber-500 text-slate-950 shrink-0 animate-pulse">
                             ✏️ Editando
@@ -1629,46 +1866,71 @@ export default function CustomerOrdersTab({
                         </span>
                       </div>
 
+                      {/* Badges automáticos de cobro en efectivo y carga pesada */}
+                      {(cashToCollectEur > 0 ||
+                        ord.cashCollectedEur ||
+                        ord.sacks >= 45) && (
+                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                          {ord.cashCollectedEur ? (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono text-[10px] font-black">
+                              💶 Cobrado: {ord.cashCollectedEur.toFixed(2)} €
+                            </span>
+                          ) : cashToCollectEur > 0 ? (
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 font-mono text-[10px] font-black">
+                              💶 Cobrar {cashToCollectEur.toFixed(2)} €
+                            </span>
+                          ) : null}
+
+                          {ord.sacks >= 45 && (
+                            <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-bold">
+                              ⚡ Carga Pesada
+                            </span>
+                          )}
+                        </div>
+                      )}
+
                       {/* Contador de sacos + Botones rápidos de ajuste -5, -1, +1, +5 */}
                       <div className="flex flex-wrap items-center gap-2 pt-0.5">
                         <span className="text-amber-400 font-black text-xs">
                           {ord.sacks} sacos ({ord.totalWeightKg} kg)
                         </span>
 
-                        <div className="flex items-center gap-1 bg-slate-950 rounded-lg p-0.5 border border-slate-700/80">
-                          <button
-                            type="button"
-                            onClick={() => handleQuickSackDelta(ord.id, -5)}
-                            title="Restar 5 sacos"
-                            className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
-                          >
-                            -5
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleQuickSackDelta(ord.id, -1)}
-                            title="Restar 1 saco"
-                            className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
-                          >
-                            -1
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleQuickSackDelta(ord.id, +1)}
-                            title="Sumar 1 saco"
-                            className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 transition"
-                          >
-                            +1
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleQuickSackDelta(ord.id, +5)}
-                            title="Sumar 5 sacos"
-                            className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 transition"
-                          >
-                            +5
-                          </button>
-                        </div>
+                        {!isCompleted && (
+                          <div className="flex items-center gap-1 bg-slate-950 rounded-lg p-0.5 border border-slate-700/80">
+                            <button
+                              type="button"
+                              onClick={() => handleQuickSackDelta(ord.id, -5)}
+                              title="Restar 5 sacos"
+                              className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
+                            >
+                              -5
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleQuickSackDelta(ord.id, -1)}
+                              title="Restar 1 saco"
+                              className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
+                            >
+                              -1
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleQuickSackDelta(ord.id, +1)}
+                              title="Sumar 1 saco"
+                              className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 transition"
+                            >
+                              +1
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleQuickSackDelta(ord.id, +5)}
+                              title="Sumar 5 sacos"
+                              className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-amber-300 hover:text-amber-200 transition"
+                            >
+                              +5
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       {ord.orderNotes && (
@@ -1678,7 +1940,7 @@ export default function CustomerOrdersTab({
                       )}
                     </div>
 
-                    {/* Botones de acción: Editar, Completar, Eliminar */}
+                    {/* Botones de acción: Editar, Completar / Reactivar, Eliminar */}
                     <div className="flex items-center gap-1 shrink-0">
                       <button
                         type="button"
@@ -1693,14 +1955,31 @@ export default function CustomerOrdersTab({
                         <Pencil className="w-4 h-4" />
                         <span className="text-[11px] hidden sm:inline">Editar</span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => onUpdateOrderStatus(ord.id, "Completado")}
-                        className="p-2 rounded-xl text-slate-400 hover:text-emerald-400 hover:bg-slate-700 transition"
-                        title="Marcar completado"
-                      >
-                        <CheckCircle2 className="w-4 h-4" />
-                      </button>
+
+                      {isCompleted ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateOrderStatus(ord.id, "Pendiente")
+                          }
+                          className="p-2 rounded-xl text-slate-400 hover:text-amber-400 hover:bg-slate-700 transition"
+                          title="Devolver a Pendiente"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateOrderStatus(ord.id, "Completado")
+                          }
+                          className="p-2 rounded-xl text-slate-400 hover:text-emerald-400 hover:bg-slate-700 transition"
+                          title="Marcar completado"
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => {

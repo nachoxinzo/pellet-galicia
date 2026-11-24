@@ -34,8 +34,16 @@ export interface Customer {
   updatedAt: string;
 }
 
+export type OrderPriority = "Normal" | "Urgente";
+
+export type OrderStatus =
+  | "Pendiente"
+  | "En Reparto"
+  | "Completado"
+  | "Cancelado";
+
 /**
- * Pedido pendiente de entrega.
+ * Pedido pendiente o en ciclo de entrega.
  */
 export interface PendingOrder {
   id: string;
@@ -44,8 +52,14 @@ export interface PendingOrder {
   sacks: number; // Cantidad de sacos sueltos (15 kg)
   totalWeightKg: number; // sacks * 15 kg
   orderNotes?: string;
+  priority?: OrderPriority; // "Normal" | "Urgente"
+  concello?: string; // Concello extraído o asignado para filtrado rápido
+  cashToCollectEur?: number; // Importe previsto a cobrar en mano
+  cashCollectedEur?: number; // Importe real cobrado al entregar
+  dispatchedAt?: string; // Fecha ISO cuando pasa a "En Reparto"
+  deliveredAt?: string; // Fecha ISO cuando pasa a "Completado"
   createdAt: string;
-  status: "Pendiente" | "En Reparto" | "Completado" | "Cancelado";
+  status: OrderStatus;
 }
 
 /**
@@ -102,11 +116,12 @@ export interface EphemeralStop {
   totalWeightKg: number;
   cashToCollectEur?: number; // Importe a cobrar en mano si aplica (c)
   tags?: string; // Etiquetas/iconos operativos cortos de descarga (t)
+  phone?: string; // Teléfono opcional para botón tel: en cabina (ph)
 }
 
 /**
  * Formato de serialización ultracompacto con claves de 1 letra para códigos QR y enlaces WhatsApp:
- * { i: idCorto, n: nombre, a: aldea, x: lat, y: lng, s: sacos, c: cobrarEnMano, t: tagsIconos }
+ * { i: idCorto, n: nombre, a: aldea, x: lat, y: lng, s: sacos, c: cobrarEnMano, t: tagsIconos, ph?: telefono }
  */
 export interface UltraCompactStopWire {
   i: string;
@@ -117,6 +132,7 @@ export interface UltraCompactStopWire {
   s: number;
   c: number;
   t: string;
+  ph?: string;
 }
 
 export interface UltraCompactTripWire {
@@ -144,4 +160,33 @@ export interface EphemeralTripPayload {
     lng: number;
   };
   stops: EphemeralStop[];
+}
+
+/**
+ * Payload ultracompacto de Retorno Zero-Cloud (/reparto -> /admin)
+ * No contiene nombres, ni direcciones, ni coordenadas GPS. Solo IDs cortos y totales.
+ */
+export interface UltraCompactReturnReceiptWire {
+  r: 1; // Versión 1 del recibo de retorno
+  k: number; // tripNum
+  d: string; // fecha YYYY-MM-DD
+  t: string; // timestamp HH:mm de cierre
+  e: {
+    i: string; // shortId de 6 caracteres del pedido
+    s: number; // sacos entregados
+    c: number; // efectivo cobrado en mano (€)
+  }[];
+}
+
+export interface DecodedReturnReceipt {
+  tripNum: number;
+  date: string;
+  closedAtTime: string;
+  deliveredItems: {
+    shortId: string;
+    sacks: number;
+    cashCollectedEur: number;
+  }[];
+  totalSacksDelivered: number;
+  totalCashCollectedEur: number;
 }

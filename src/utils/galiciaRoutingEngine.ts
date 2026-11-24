@@ -1,10 +1,11 @@
 import { Coordinates, PELLET_GALICIA_RULES } from "@/types/pelletGalicia";
-import { fetchOsrmTable } from "./osrmTableService";
+import { fetchOsrmTable, getCachedOsrmPairMetrics } from "./osrmTableService";
 
 export interface RoutableOrder {
   id: string;
   sacks: number;
   totalWeightKg?: number;
+  priority?: "Normal" | "Urgente";
   customer?: { name?: string; coordinates: Coordinates; [key: string]: any };
   client?: { name?: string; coordinates: Coordinates; [key: string]: any };
   [key: string]: any;
@@ -14,6 +15,7 @@ export interface FuelOptimizationParams {
   consumoVacioL100: number; // Ej. 8.5 L/100km
   extraConsumoPorTonelada: number; // Ej. +2.2 L/100km por 1.000 kg
   precioCombustible: number; // Ej. 1.55 €/L
+  precioPorSaco?: number; // Ej. 4.50 €/saco
 }
 
 export interface StopFuelLegDetail {
@@ -44,6 +46,10 @@ export interface OptimizedGaliciaTrip<T = any> {
   heavyFirstSavedLiters: number;
   totalFuelCostEur: number;
   costPerSackEur: number;
+  urgentOrdersCount: number;
+  tripRevenueEur: number;
+  tripNetMarginEur: number;
+  tripNetMarginPercent: number;
   isHighCostPerSack: boolean;
   highCostWarningReason?: string;
   legDetails: StopFuelLegDetail[];
@@ -61,6 +67,7 @@ export interface GaliciaRoutingResult<T = any> {
   totalSacks: number;
   totalOrders: number;
   usedRealOsrmTable: boolean;
+  fromOsrmCache: boolean;
   totalDistanceKm: number;
   totalDrivingMinutes: number;
   totalBaseFuelLiters: number;
@@ -69,6 +76,8 @@ export interface GaliciaRoutingResult<T = any> {
   totalHeavyFirstSavedLiters: number;
   totalFuelCostEur: number;
   averageCostPerSackEur: number;
+  totalRevenueEur: number;
+  totalNetMarginEur: number;
   interRouteSwapsApplied: number;
 }
 
@@ -77,6 +86,7 @@ export const DEFAULT_FUEL_PARAMS: FuelOptimizationParams = {
   extraConsumoPorTonelada:
     PELLET_GALICIA_RULES.DEFAULT_EXTRA_CONSUMO_TONELADA,
   precioCombustible: PELLET_GALICIA_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
+  precioPorSaco: PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO,
 };
 
 function getOrderCoordinates(order: RoutableOrder): Coordinates {
@@ -120,10 +130,17 @@ function buildFallbackMatrices(allCoords: Coordinates[]): {
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
       if (i === j) continue;
-      const d = estimateRoadDistanceKm(allCoords[i], allCoords[j]);
-      distKm[i][j] = d;
-      // Velocidad media rural en Galicia ~48 km/h
-      durSec[i][j] = (d / 48) * 3600;
+      // Primero intentar recuperar la distancia y duración real de carretera desde la caché OSRM de sesión
+      const cachedPair = getCachedOsrmPairMetrics(allCoords[i], allCoords[j]);
+      if (cachedPair) {
+        distKm[i][j] = cachedPair.distanceMeters / 1000;
+        durSec[i][j] = cachedPair.durationSeconds;
+      } else {
+        const d = estimateRoadDistanceKm(allCoords[i], allCoords[j]);
+        distKm[i][j] = d;
+        // Velocidad media rural en Galicia ~48 km/h
+        durSec[i][j] = (d / 48) * 3600;
+      }
     }
   }
 
@@ -741,6 +758,20 @@ function buildTripMetricsObject<T extends RoutableOrder>(
     }
   }
 
+  const pricePerSack =
+    fuelParams.precioPorSaco ?? PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO;
+  const urgentOrdersCount = sortedOrders.filter(
+    (o) => o.priority === "Urgente"
+  ).length;
+  const tripRevenueEur = Number((tripSacks * pricePerSack).toFixed(2));
+  const tripNetMarginEur = Number(
+    (tripRevenueEur - totalFuelCostEur).toFixed(2)
+  );
+  const tripNetMarginPercent =
+    tripRevenueEur > 0
+      ? Number(((tripNetMarginEur / tripRevenueEur) * 100).toFixed(1))
+      : 0;
+
   return {
     tripNumber,
     orders: sortedOrders,
@@ -760,6 +791,10 @@ function buildTripMetricsObject<T extends RoutableOrder>(
     heavyFirstSavedLiters: Number(heavyFirstSavedLiters.toFixed(3)),
     totalFuelCostEur: Number(totalFuelCostEur.toFixed(2)),
     costPerSackEur: Number(costPerSackEur.toFixed(2)),
+    urgentOrdersCount,
+    tripRevenueEur,
+    tripNetMarginEur,
+    tripNetMarginPercent,
     isHighCostPerSack,
     highCostWarningReason,
     legDetails: forwardEval.legDetails,
@@ -816,6 +851,7 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
       totalSacks: 0,
       totalOrders: 0,
       usedRealOsrmTable: false,
+      fromOsrmCache: false,
       totalDistanceKm: 0,
       totalDrivingMinutes: 0,
       totalBaseFuelLiters: 0,
@@ -824,6 +860,8 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
       totalHeavyFirstSavedLiters: 0,
       totalFuelCostEur: 0,
       averageCostPerSackEur: 0,
+      totalRevenueEur: 0,
+      totalNetMarginEur: 0,
       interRouteSwapsApplied: 0,
     };
   }
@@ -834,13 +872,14 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
     ...orders.map((o) => getOrderCoordinates(o)),
   ];
 
-  // 2a. Matriz real de distancias (m -> km) y tiempos (s) usando OSRM Table API
+  // 2a. Matriz real de distancias (m -> km) y tiempos (s) usando OSRM Table API (o caché local de pares)
   const osrmTable = await fetchOsrmTable(allCoords);
   const fallback = buildFallbackMatrices(allCoords);
 
   let distMatrixKm = fallback.distKm;
   let durMatrixSec = fallback.durSec;
   let usedRealOsrm = false;
+  let fromOsrmCache = false;
 
   if (
     osrmTable &&
@@ -848,6 +887,7 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
     osrmTable.durations.length === allCoords.length
   ) {
     usedRealOsrm = true;
+    fromOsrmCache = Boolean(osrmTable.fromCache);
     durMatrixSec = osrmTable.durations.map((row, i) =>
       row.map((val, j) =>
         typeof val === "number" && val >= 0 ? val : fallback.durSec[i][j]
@@ -928,8 +968,13 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
     }
   );
 
-  // Ordenar viajes para hacer primero los viajes más llenos/eficientes
-  finalTripsUnsorted.sort((a, b) => b.totalSacks - a.totalSacks);
+  // Ordenar viajes priorizando primero los que tienen pedidos urgentes y luego los más llenos/eficientes
+  finalTripsUnsorted.sort((a, b) => {
+    if (b.urgentOrdersCount !== a.urgentOrdersCount) {
+      return b.urgentOrdersCount - a.urgentOrdersCount;
+    }
+    return b.totalSacks - a.totalSacks;
+  });
   const trips = finalTripsUnsorted.map((t, idx) => ({
     ...t,
     tripNumber: idx + 1,
@@ -959,6 +1004,12 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
   );
   const averageCostPerSackEur =
     totalSacks > 0 ? Number((totalFuelCostEur / totalSacks).toFixed(2)) : 0;
+  const pricePerSack =
+    fuelParams.precioPorSaco ?? PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO;
+  const totalRevenueEur = Number((totalSacks * pricePerSack).toFixed(2));
+  const totalNetMarginEur = Number(
+    (totalRevenueEur - totalFuelCostEur).toFixed(2)
+  );
 
   return {
     trips,
@@ -966,6 +1017,7 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
     totalSacks,
     totalOrders: orders.length,
     usedRealOsrmTable: usedRealOsrm,
+    fromOsrmCache,
     totalDistanceKm,
     totalDrivingMinutes,
     totalBaseFuelLiters,
@@ -974,6 +1026,8 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
     totalHeavyFirstSavedLiters,
     totalFuelCostEur,
     averageCostPerSackEur,
+    totalRevenueEur,
+    totalNetMarginEur,
     interRouteSwapsApplied: swapsCount,
   };
 }

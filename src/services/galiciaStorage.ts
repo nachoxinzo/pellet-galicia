@@ -1,9 +1,34 @@
 import {
   Customer,
   PendingOrder,
+  OrderPriority,
+  DecodedReturnReceipt,
   VanConfig,
   PELLET_GALICIA_RULES,
 } from "@/types/pelletGalicia";
+import { extractCashAndTagsFromNotes } from "@/utils/galiciaUrlCodec";
+
+export function extractConcelloFromVillage(village?: string): string {
+  if (!village) return "Otros";
+  const parts = village
+    .split(/[,—\-()]/)
+    .map((s) => s.trim())
+    .filter(
+      (s) =>
+        s.length > 2 &&
+        !/^\d+$/.test(s) &&
+        ![
+          "ourense",
+          "lugo",
+          "pontevedra",
+          "a coruña",
+          "coruña",
+          "galicia",
+          "españa",
+        ].includes(s.toLowerCase())
+    );
+  return parts[parts.length - 1] || parts[0] || "General";
+}
 
 const STORAGE_KEYS = {
   CUSTOMERS: "pelletgalicia_customers_v2",
@@ -267,7 +292,8 @@ class LocalGaliciaStorageService {
   saveOrder(
     customerId: string,
     sacks: number,
-    orderNotes?: string
+    orderNotes?: string,
+    priority: OrderPriority = "Normal"
   ): PendingOrder {
     const customers = this.getCustomers();
     const custIdx = customers.findIndex((c) => c.id === customerId);
@@ -279,6 +305,8 @@ class LocalGaliciaStorageService {
       orderNotes?.trim() !== undefined && orderNotes.trim() !== ""
         ? orderNotes.trim()
         : existingCust.internalNotes || "";
+
+    const { cashToCollectEur } = extractCashAndTagsFromNotes(resolvedNotes);
 
     // Actualizar estadísticas históricas de la ficha del cliente
     const updatedCustomer: Customer = {
@@ -305,6 +333,9 @@ class LocalGaliciaStorageService {
       sacks,
       totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
       orderNotes: resolvedNotes,
+      priority,
+      concello: extractConcelloFromVillage(updatedCustomer.village),
+      cashToCollectEur: cashToCollectEur > 0 ? cashToCollectEur : undefined,
       createdAt: now,
       status: "Pendiente",
     };
@@ -327,6 +358,7 @@ class LocalGaliciaStorageService {
     updates: {
       sacks?: number;
       orderNotes?: string;
+      priority?: OrderPriority;
       status?: PendingOrder["status"];
     }
   ): PendingOrder | null {
@@ -342,6 +374,7 @@ class LocalGaliciaStorageService {
       updates.orderNotes !== undefined
         ? updates.orderNotes.trim()
         : current.orderNotes;
+    const { cashToCollectEur } = extractCashAndTagsFromNotes(updatedNotes);
 
     // Sincronizar ficha del cliente habitual
     const customers = this.getCustomers();
@@ -370,6 +403,9 @@ class LocalGaliciaStorageService {
       sacks,
       totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
       orderNotes: updatedNotes,
+      priority: updates.priority ?? current.priority ?? "Normal",
+      concello: extractConcelloFromVillage(updatedCustomer.village),
+      cashToCollectEur: cashToCollectEur > 0 ? cashToCollectEur : undefined,
       status: updates.status ?? current.status,
     };
 
@@ -485,6 +521,86 @@ class LocalGaliciaStorageService {
 
   markOrdersAsDelivered(orderIds: string[]): void {
     this.markOrdersDelivered(orderIds);
+  }
+
+  /**
+   * Marca un conjunto de pedidos como "En Reparto" al despachar el viaje al chofer.
+   */
+  markOrdersInDelivery(orderIds: string[]): void {
+    const now = new Date().toISOString();
+    const orders = this.getOrders().map((o) =>
+      orderIds.includes(o.id)
+        ? { ...o, status: "En Reparto" as const, dispatchedAt: now }
+        : o
+    );
+    this.write(STORAGE_KEYS.ORDERS, orders);
+  }
+
+  /**
+   * Concilia un recibo de cierre Zero-Cloud (/reparto -> /admin) cruzando los IDs cortos de 6 caracteres.
+   */
+  reconcileReturnReceipt(receipt: DecodedReturnReceipt): {
+    matchedOrderIds: string[];
+    totalSacksUpdated: number;
+    totalCashRecordedEur: number;
+  } {
+    const allOrders = this.getOrders();
+    const customers = this.getCustomers();
+    const now = new Date().toISOString();
+
+    const matchedOrderIds: string[] = [];
+    let totalSacksUpdated = 0;
+    let totalCashRecordedEur = 0;
+    let customersChanged = false;
+
+    const updatedOrders = allOrders.map((ord) => {
+      const ordShortId = ord.id.replace(/^(eph-|ord-)/g, "").slice(-6);
+      const item = receipt.deliveredItems.find(
+        (it) =>
+          it.shortId === ordShortId ||
+          ord.id.endsWith(it.shortId) ||
+          it.shortId.endsWith(ordShortId)
+      );
+
+      if (!item) return ord;
+
+      matchedOrderIds.push(ord.id);
+      totalSacksUpdated += item.sacks;
+      totalCashRecordedEur += item.cashCollectedEur;
+
+      const custIdx = customers.findIndex((c) => c.id === ord.customerId);
+      if (custIdx >= 0) {
+        customers[custIdx] = {
+          ...customers[custIdx],
+          ultimosSacos: item.sacks,
+          fechaUltimoPedido: now,
+          updatedAt: now,
+        };
+        customersChanged = true;
+      }
+
+      return {
+        ...ord,
+        sacks: item.sacks,
+        totalWeightKg: item.sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+        status: "Completado" as const,
+        deliveredAt: now,
+        cashCollectedEur: item.cashCollectedEur,
+      };
+    });
+
+    if (matchedOrderIds.length > 0) {
+      this.write(STORAGE_KEYS.ORDERS, updatedOrders);
+      if (customersChanged) {
+        this.write(STORAGE_KEYS.CUSTOMERS, customers);
+      }
+    }
+
+    return {
+      matchedOrderIds,
+      totalSacksUpdated,
+      totalCashRecordedEur: Number(totalCashRecordedEur.toFixed(2)),
+    };
   }
 
   // --- CONFIGURACIÓN ---
@@ -665,8 +781,16 @@ class LocalGaliciaStorageService {
               1,
               Math.min(500, Math.floor(Number(o.sacks) || 1))
             );
+            const validStatuses: PendingOrder["status"][] = [
+              "Pendiente",
+              "En Reparto",
+              "Completado",
+              "Cancelado",
+            ];
             const status: PendingOrder["status"] =
-              o.status === "Completado" || o.status === "En Ruta"
+              o.status === "En Ruta"
+                ? "En Reparto"
+                : validStatuses.includes(o.status)
                 ? o.status
                 : "Pendiente";
 

@@ -13,6 +13,7 @@ import {
   VanConfig,
   EphemeralStop,
   EphemeralTripPayload,
+  DecodedReturnReceipt,
 } from "@/types/pelletGalicia";
 import {
   optimizeGaliciaRoutes,
@@ -25,8 +26,12 @@ import {
   encodeTripPayload,
   buildGoogleMapsMultiStopUrl,
   extractCashAndTagsFromNotes,
+  decodeReturnReceipt,
 } from "@/utils/galiciaUrlCodec";
-import { normalizePhoneDigits } from "@/services/galiciaStorage";
+import {
+  normalizePhoneDigits,
+  extractConcelloFromVillage,
+} from "@/services/galiciaStorage";
 import { QRCodeSVG } from "qrcode.react";
 import {
   Route as RouteIcon,
@@ -52,6 +57,10 @@ import {
   Scale,
   Coins,
   Printer,
+  TrendingUp,
+  Inbox,
+  Flame,
+  Filter,
 } from "lucide-react";
 
 const DeliveryRouteMap = dynamic(
@@ -70,15 +79,26 @@ interface RoutePlannerTabProps {
   orders: PendingOrder[];
   config: VanConfig;
   onMarkDelivered: (orderIds: string[]) => void;
+  onMarkInDelivery?: (orderIds: string[]) => void;
+  onReconcileReturnReceipt?: (receipt: DecodedReturnReceipt) => {
+    matchedOrderIds: string[];
+    totalSacksUpdated: number;
+    totalCashRecordedEur: number;
+  };
 }
 
 export default function RoutePlannerTab({
   orders,
   config,
   onMarkDelivered,
+  onMarkInDelivery,
+  onReconcileReturnReceipt,
 }: RoutePlannerTabProps) {
   const pendingOrders = useMemo(
-    () => orders.filter((o) => o.status === "Pendiente"),
+    () =>
+      orders.filter(
+        (o) => o.status === "Pendiente" || o.status === "En Reparto"
+      ),
     [orders]
   );
 
@@ -88,17 +108,30 @@ export default function RoutePlannerTab({
   const [osrmRouteData, setOsrmRouteData] = useState<OsrmRouteGeometryResult | null>(null);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [interRouteSwaps, setInterRouteSwaps] = useState<number>(0);
+  const [fromOsrmCache, setFromOsrmCache] = useState<boolean>(false);
+
+  // Filtros rápidos en Pedidos Disponibles (Concello y Urgentes)
+  const [concelloFilter, setConcelloFilter] = useState<string>("ALL");
+
+  // Modal de Conciliación de Cierre Zero-Cloud (/reparto -> /admin)
+  const [isReconcileOpen, setIsReconcileOpen] = useState(false);
+  const [returnTokenInput, setReturnTokenInput] = useState("");
+  const [reconcileResultMsg, setReconcileResultMsg] = useState<string | null>(
+    null
+  );
 
   const fuelParams: FuelOptimizationParams = useMemo(
     () => ({
       consumoVacioL100: config.consumoVacioL100 ?? 8.5,
       extraConsumoPorTonelada: config.extraConsumoPorTonelada ?? 2.2,
       precioCombustible: config.precioCombustible ?? 1.55,
+      precioPorSaco: config.precioPorSaco ?? 4.5,
     }),
     [
       config.consumoVacioL100,
       config.extraConsumoPorTonelada,
       config.precioCombustible,
+      config.precioPorSaco,
     ]
   );
 
@@ -140,6 +173,7 @@ export default function RoutePlannerTab({
 
       setTrips(res.trips);
       setInterRouteSwaps(res.interRouteSwapsApplied);
+      setFromOsrmCache(res.fromOsrmCache);
       setActiveTripIdx(0);
     } catch (err) {
       console.error("Error optimizando:", err);
@@ -181,6 +215,13 @@ export default function RoutePlannerTab({
     const totalSacksInTrips = trips.reduce((s, t) => s + t.totalSacks, 0);
     const avgCostPerSack =
       totalSacksInTrips > 0 ? totalCostEur / totalSacksInTrips : 0;
+    const pricePerSack = config.precioPorSaco ?? 4.5;
+    const grossRevenueEur = Number((totalSacksInTrips * pricePerSack).toFixed(2));
+    const netMarginEur = Number((grossRevenueEur - totalCostEur).toFixed(2));
+    const netMarginPerSackEur =
+      totalSacksInTrips > 0
+        ? Number((netMarginEur / totalSacksInTrips).toFixed(2))
+        : 0;
     const highCostTrips = trips.filter((t) => t.isHighCostPerSack);
 
     return {
@@ -196,9 +237,13 @@ export default function RoutePlannerTab({
         (weightExtraLiters * fuelParams.precioCombustible).toFixed(2)
       ),
       avgCostPerSack: Number(avgCostPerSack.toFixed(2)),
+      pricePerSack,
+      grossRevenueEur,
+      netMarginEur,
+      netMarginPerSackEur,
       highCostTrips,
     };
-  }, [trips, fuelParams]);
+  }, [trips, fuelParams, config.precioPorSaco]);
 
   // Actualizar polilínea OSRM
   useEffect(() => {
@@ -281,6 +326,7 @@ export default function RoutePlannerTab({
         totalWeightKg: ord.totalWeightKg,
         cashToCollectEur,
         tags,
+        phone: ord.customer.phone || undefined,
       };
     });
 
@@ -324,11 +370,81 @@ export default function RoutePlannerTab({
     return map;
   }, [activeTrip, departureTime]);
 
-  // Generar Hoja de Reparto / Enlace / QR
+  // Generar Hoja de Reparto / Enlace / QR y marcar viaje como "En Reparto"
   const handleGenerateDispatch = () => {
     if (!activeTrip || activeTrip.orders.length === 0) return;
     setSharePayloadStr(activeTripEncodedPayload);
+    if (onMarkInDelivery) {
+      onMarkInDelivery(activeTrip.orders.map((o) => o.id));
+    }
     setIsQrOpen(true);
+  };
+
+  // Conciliar recibo de cierre Zero-Cloud (/reparto -> /admin)
+  const handleProcessReturnReceipt = () => {
+    const decoded = decodeReturnReceipt(returnTokenInput);
+    if (!decoded) {
+      setReconcileResultMsg(
+        "❌ Código de cierre no válido. Pega el mensaje completo de WhatsApp o el código PG1-..."
+      );
+      return;
+    }
+    if (onReconcileReturnReceipt) {
+      const res = onReconcileReturnReceipt(decoded);
+      setReconcileResultMsg(
+        `✅ Cierre conciliado: ${res.matchedOrderIds.length} paradas completadas (${res.totalSacksUpdated} sacos · ${res.totalCashRecordedEur.toFixed(
+          2
+        )} € en efectivo).`
+      );
+      setSelectedOrderIds((prev) =>
+        prev.filter((id) => !res.matchedOrderIds.includes(id))
+      );
+      setReturnTokenInput("");
+    }
+  };
+
+  // Acciones en 1 Clic en "Pedidos Disponibles"
+  const availableConcellos = useMemo(() => {
+    const set = new Set<string>();
+    pendingOrders.forEach((o) => {
+      set.add(o.concello || extractConcelloFromVillage(o.customer.village));
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
+  }, [pendingOrders]);
+
+  const filteredAvailableOrders = useMemo(() => {
+    if (concelloFilter === "ALL") return pendingOrders;
+    if (concelloFilter === "URGENTES") {
+      return pendingOrders.filter((o) => o.priority === "Urgente");
+    }
+    return pendingOrders.filter(
+      (o) =>
+        (o.concello || extractConcelloFromVillage(o.customer.village)) ===
+        concelloFilter
+    );
+  }, [pendingOrders, concelloFilter]);
+
+  const handleSelectOneVanCapacity = () => {
+    let acc = 0;
+    const picked: string[] = [];
+    // Priorizar urgentes primero
+    const sorted = [...filteredAvailableOrders].sort((a, b) =>
+      a.priority === "Urgente" && b.priority !== "Urgente"
+        ? -1
+        : b.priority === "Urgente" && a.priority !== "Urgente"
+        ? 1
+        : b.sacks - a.sacks
+    );
+    for (const ord of sorted) {
+      if (acc + ord.sacks <= config.vanCapacitySacks) {
+        picked.push(ord.id);
+        acc += ord.sacks;
+      }
+    }
+    if (picked.length === 0 && sorted.length > 0) {
+      picked.push(sorted[0].id);
+    }
+    setSelectedOrderIds(picked);
   };
 
   // Abrir e imprimir Hoja de Carga y Ruta A4
@@ -379,59 +495,10 @@ export default function RoutePlannerTab({
     (selectedSacksTotal / config.vanCapacitySacks) * 100
   );
 
-  // Mapear para Leaflet
-  const mapPendingOrders = useMemo(() => {
-    return pendingOrders.map((o) => ({
-      id: o.id,
-      clientId: o.customerId,
-      client: {
-        id: o.customer.id,
-        name: o.customer.name,
-        phone: o.customer.phone || "",
-        address: o.customer.village,
-        coordinates: o.customer.coordinates,
-        unloadingNotes: o.orderNotes || "",
-        preferredTimeWindow: "Mañana" as const,
-        createdAt: o.createdAt,
-        updatedAt: o.createdAt,
-      },
-      pallets: 0,
-      looseSacks: o.sacks,
-      totalSacksCount: o.sacks,
-      totalWeightKg: o.totalWeightKg,
-      equivalentPallets: o.sacks / 70,
-      status: "Pendiente" as const,
-      createdAt: o.createdAt,
-      updatedAt: o.createdAt,
-    }));
-  }, [pendingOrders]);
-
-  const mapSelectedOrders = useMemo(() => {
-    if (!activeTrip) return [];
-    return activeTrip.orders.map((o) => ({
-      id: o.id,
-      clientId: o.customerId,
-      client: {
-        id: o.customer.id,
-        name: o.customer.name,
-        phone: o.customer.phone || "",
-        address: o.customer.village,
-        coordinates: o.customer.coordinates,
-        unloadingNotes: o.orderNotes || "",
-        preferredTimeWindow: "Mañana" as const,
-        createdAt: o.createdAt,
-        updatedAt: o.createdAt,
-      },
-      pallets: 0,
-      looseSacks: o.sacks,
-      totalSacksCount: o.sacks,
-      totalWeightKg: o.totalWeightKg,
-      equivalentPallets: o.sacks / 70,
-      status: "Pendiente" as const,
-      createdAt: o.createdAt,
-      updatedAt: o.createdAt,
-    }));
-  }, [activeTrip]);
+  const selectedActiveTripOrders = useMemo(
+    () => (activeTrip ? activeTrip.orders : []),
+    [activeTrip]
+  );
 
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
   const effectivePayload = sharePayloadStr || activeTripEncodedPayload;
@@ -533,8 +600,8 @@ export default function RoutePlannerTab({
             address: config.warehouseVillage,
             coordinates: config.warehouseCoordinates,
           }}
-          pendingOrders={mapPendingOrders}
-          selectedOrders={mapSelectedOrders}
+          pendingOrders={pendingOrders}
+          selectedOrders={selectedActiveTripOrders}
           onOrderClick={toggleSelectOrder}
           osrmPolyline={osrmRouteData?.polyline}
           height="400px"
@@ -557,6 +624,11 @@ export default function RoutePlannerTab({
                   <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                     Heavy-First Activo
                   </span>
+                  {fromOsrmCache && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                      ⚡ Matriz OSRM en Caché (0 ms)
+                    </span>
+                  )}
                   {interRouteSwaps > 0 && (
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30">
                       {interRouteSwaps} intercambios Inter-Ruta aplicados
@@ -590,8 +662,8 @@ export default function RoutePlannerTab({
             )}
           </div>
 
-          {/* 4 KPIs Principales de Combustible y Coste */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          {/* 5 KPIs Principales de Combustible, Coste y Margen Neto */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
             {/* KPI 1: Número óptimo de viajes y llenado */}
             <div className="p-3.5 rounded-2xl bg-slate-950/90 border border-slate-800 space-y-1.5">
               <span className="text-[10px] font-bold uppercase text-slate-400 block">
@@ -711,6 +783,32 @@ export default function RoutePlannerTab({
                 ))}
               </div>
             </div>
+
+            {/* KPI 5: Margen Neto Estimado del Reparto (Ingresos Sacos - Gasoil) */}
+            <div className="p-3.5 rounded-2xl bg-slate-950/90 border border-emerald-500/40 space-y-1.5">
+              <span className="text-[10px] font-bold uppercase text-emerald-300 flex items-center justify-between">
+                <span>5. Margen Neto Estimado</span>
+                <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+              </span>
+              <div className="text-lg font-black text-emerald-400">
+                +{globalFuelSummary.netMarginEur.toFixed(2)} €{" "}
+                <span className="text-xs font-bold text-slate-400">netos</span>
+              </div>
+              <div className="text-[11px] text-slate-300 space-y-0.5">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Venta bruta:</span>
+                  <span className="font-mono font-bold text-white">
+                    {globalFuelSummary.grossRevenueEur.toFixed(2)} €
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Margen / saco:</span>
+                  <span className="font-mono font-bold text-emerald-300">
+                    +{globalFuelSummary.netMarginPerSackEur.toFixed(2)} €/saco
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Alerta en color ámbar si algún viaje queda con pocos sacos o muy lejos y dispara el coste por saco */}
@@ -780,6 +878,20 @@ export default function RoutePlannerTab({
                 <span>📲 Enviar Ruta al Repartidor</span>
               </button>
 
+              {/* BOTÓN CONCILIAR CIERRE DE REPARTO ZERO-CLOUD */}
+              <button
+                type="button"
+                onClick={() => {
+                  setReconcileResultMsg(null);
+                  setIsReconcileOpen((p) => !p);
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-2xl bg-slate-800 hover:bg-slate-700 text-sky-300 font-black text-xs border border-sky-500/40 transition"
+                title="Pegar código PG1-... enviado por el repartidor al terminar la ruta"
+              >
+                <Inbox className="w-3.5 h-3.5 text-sky-400" />
+                <span>📥 Conciliar Cierre</span>
+              </button>
+
               {/* BOTÓN MARCAR COMO ENTREGADO */}
               <button
                 type="button"
@@ -792,6 +904,48 @@ export default function RoutePlannerTab({
               </button>
             </div>
           </div>
+
+          {/* CAJÓN DE CONCILIACIÓN DE CIERRE ZERO-CLOUD (/reparto -> /admin) */}
+          {isReconcileOpen && (
+            <div className="p-4 rounded-2xl bg-slate-950 border-2 border-sky-500/50 space-y-2.5 animate-in fade-in duration-150">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-black text-sky-300 flex items-center gap-1.5">
+                  <Inbox className="w-4 h-4 text-sky-400" />
+                  <span>
+                    Conciliación Zero-Cloud (/reparto ➔ /admin): Pega el mensaje o código PG1-... del repartidor
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsReconcileOpen(false)}
+                  className="text-xs text-slate-400 hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  placeholder="Pega aquí el código PG1-... o el resumen de WhatsApp enviado por el chofer..."
+                  value={returnTokenInput}
+                  onChange={(e) => setReturnTokenInput(e.target.value)}
+                  className="flex-1 px-3 py-2 text-xs bg-slate-900 border border-slate-700 rounded-xl text-white font-mono outline-none focus:border-sky-400"
+                />
+                <button
+                  type="button"
+                  onClick={handleProcessReturnReceipt}
+                  className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-black text-xs shrink-0 transition"
+                >
+                  Confirmar Cierre y Cobros
+                </button>
+              </div>
+              {reconcileResultMsg && (
+                <p className="text-xs font-bold text-emerald-300">
+                  {reconcileResultMsg}
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="flex flex-wrap gap-2 pt-1">
             {trips.map((t, idx) => {
@@ -808,13 +962,18 @@ export default function RoutePlannerTab({
                   }`}
                 >
                   <span>Viaje #{t.tripNumber}</span>
+                  {t.urgentOrdersCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white text-[10px] font-black">
+                      🚨 {t.urgentOrdersCount} urg.
+                    </span>
+                  )}
                   <span
                     className={`px-1.5 py-0.5 rounded text-[10px] ${
                       isActive ? "bg-slate-950 text-amber-400" : "bg-slate-900 text-slate-400"
                     }`}
                   >
                     {t.totalSacks}/{config.vanCapacitySacks} sacos ({t.occupancyPercent}%) •{" "}
-                    {t.totalDistanceKm} km • {t.totalFuelLiters} L ({t.totalFuelCostEur} €)
+                    {t.totalDistanceKm} km • Neto: +{t.tripNetMarginEur.toFixed(0)} €
                   </span>
                 </button>
               );
@@ -825,26 +984,77 @@ export default function RoutePlannerTab({
 
       {/* PARADAS REORDENABLES (DRAG & DROP) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Columna Izquierda: Pedidos Disponibles */}
+        {/* Columna Izquierda: Pedidos Disponibles con Filtros por Concello y Acciones en 1 Clic */}
         <div className="lg:col-span-5 bg-slate-900 border border-slate-800 p-5 rounded-3xl space-y-3 shadow-xl">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-            <h3 className="text-xs font-black uppercase tracking-wider text-slate-300">
-              Pedidos Disponibles ({pendingOrders.length})
-            </h3>
-            <span className="text-[11px] text-slate-400">
-              {selectedOrderIds.length} seleccionados
-            </span>
+          <div className="space-y-2.5 border-b border-slate-800 pb-2.5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-black uppercase tracking-wider text-slate-300">
+                Pedidos Disponibles ({filteredAvailableOrders.length})
+              </h3>
+              <span className="text-[11px] text-amber-400 font-bold">
+                {selectedOrderIds.length} seleccionados ({selectedSacksTotal} sacos)
+              </span>
+            </div>
+
+            {/* Acciones Rápidas en 1 Clic */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  setSelectedOrderIds(filteredAvailableOrders.map((o) => o.id))
+                }
+                className="px-2.5 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-[10px] border border-slate-700 transition"
+              >
+                ✓ Todos ({filteredAvailableOrders.length})
+              </button>
+              <button
+                type="button"
+                onClick={handleSelectOneVanCapacity}
+                className="px-2.5 py-1 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-black text-[10px] border border-amber-500/40 transition"
+              >
+                🚐 Llenar 1 Furgón ({config.vanCapacitySacks} sacos)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedOrderIds([])}
+                className="px-2.5 py-1 rounded-xl bg-slate-800/60 hover:bg-slate-800 text-slate-400 hover:text-white font-bold text-[10px] border border-slate-800 transition"
+              >
+                Limpiar
+              </button>
+            </div>
+
+            {/* Filtro por Concello / Urgentes */}
+            {pendingOrders.length > 0 && (
+              <div className="flex items-center gap-1.5">
+                <Filter className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <select
+                  value={concelloFilter}
+                  onChange={(e) => setConcelloFilter(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-[11px] bg-slate-950 border border-slate-800 rounded-xl text-white font-bold outline-none focus:border-amber-500"
+                >
+                  <option value="ALL">Todos los Concellos ({pendingOrders.length})</option>
+                  <option value="URGENTES">🚨 Solo Pedidos Urgentes</option>
+                  {availableConcellos.map((c) => (
+                    <option key={c} value={c}>
+                      📍 Concello / Zona: {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
-            {pendingOrders.length === 0 ? (
+            {filteredAvailableOrders.length === 0 ? (
               <div className="p-6 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl space-y-1">
-                <p className="font-bold text-slate-400">No hay pedidos pendientes</p>
-                <p className="text-[11px]">Ve a la pestaña &apos;Pedidos y Clientes&apos; para añadir tus propios clientes y pedidos.</p>
+                <p className="font-bold text-slate-400">No hay pedidos en este filtro</p>
+                <p className="text-[11px]">Ve a la pestaña &apos;Pedidos y Clientes&apos; o cambia el filtro de concello.</p>
               </div>
             ) : (
-              pendingOrders.map((ord) => {
+              filteredAvailableOrders.map((ord) => {
                 const isSelected = selectedOrderIds.includes(ord.id);
+                const isUrgent = ord.priority === "Urgente";
+                const isInDelivery = ord.status === "En Reparto";
                 return (
                   <div
                     key={ord.id}
@@ -855,8 +1065,20 @@ export default function RoutePlannerTab({
                         : "bg-slate-800/40 border-slate-800 opacity-60 hover:opacity-100"
                     }`}
                   >
-                    <div className="space-y-0.5">
-                      <div className="font-bold text-white">{ord.customer.name}</div>
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="font-bold text-white flex items-center gap-1.5 flex-wrap">
+                        <span className="truncate">{ord.customer.name}</span>
+                        {isUrgent && (
+                          <span className="px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[9px] font-black">
+                            🚨 Urgente
+                          </span>
+                        )}
+                        {isInDelivery && (
+                          <span className="px-1.5 py-0.2 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/40 text-[9px] font-black">
+                            🚛 En Reparto
+                          </span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-slate-400 line-clamp-1">{ord.customer.village}</div>
                     </div>
                     <div className="text-right shrink-0">
@@ -986,8 +1208,25 @@ export default function RoutePlannerTab({
                                       <span className="px-2 py-0.5 rounded bg-slate-900 text-slate-300 border border-slate-700 font-mono">
                                         Tramo: {leg.distanceFromPrevKm} km (~{leg.drivingMinutesFromPrev} min)
                                       </span>
-                                      <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono">
-                                        Peso en furgón: {leg.carriedWeightKgBeforeUnload} kg ({leg.carriedSacksBeforeUnload} sacos)
+                                      <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20 font-mono flex items-center gap-1.5">
+                                        <span>
+                                          Peso en furgón: {leg.carriedWeightKgBeforeUnload} kg ({leg.carriedSacksBeforeUnload} sacos)
+                                        </span>
+                                        <span className="w-14 h-1.5 bg-slate-950 rounded-full overflow-hidden inline-block border border-slate-800">
+                                          <span
+                                            className="block h-full bg-amber-400"
+                                            style={{
+                                              width: `${Math.min(
+                                                100,
+                                                Math.round(
+                                                  (leg.carriedSacksBeforeUnload /
+                                                    Math.max(1, config.vanCapacitySacks)) *
+                                                    100
+                                                )
+                                              )}%`,
+                                            }}
+                                          />
+                                        </span>
                                       </span>
                                       <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-mono font-bold">
                                         ⛽ {leg.legFuelLiters} L ({leg.legFuelCostEur} €)
