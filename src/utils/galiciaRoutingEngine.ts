@@ -1,58 +1,62 @@
-import { Coordinates, PELLET_GALICIA_RULES } from "@/types/pelletGalicia";
+import {
+  Coordinates,
+  FIELD_SERVICE_RULES,
+  OrderPriority,
+  ServiceType,
+} from "@/types/pelletGalicia";
 import { fetchOsrmTable, getCachedOsrmPairMetrics } from "./osrmTableService";
 
-export interface RoutableOrder {
+export interface RoutableServiceOrder {
   id: string;
-  sacks: number;
-  totalWeightKg?: number;
-  priority?: "Normal" | "Urgente";
+  serviceType?: ServiceType;
+  priority?: OrderPriority;
+  estimatedMinutes?: number;
+  estimatedPriceEur?: number;
+  collectedPriceEur?: number;
   customer?: { name?: string; coordinates: Coordinates; [key: string]: any };
-  client?: { name?: string; coordinates: Coordinates; [key: string]: any };
   [key: string]: any;
 }
 
-export interface FuelOptimizationParams {
-  consumoVacioL100: number; // Ej. 8.5 L/100km
-  extraConsumoPorTonelada: number; // Ej. +2.2 L/100km por 1.000 kg
+export interface FieldRoutingParams {
+  consumoL100: number; // Ej. 7.5 L/100km
   precioCombustible: number; // Ej. 1.55 €/L
-  precioPorSaco?: number; // Ej. 4.50 €/saco
+  hourlyCostEur?: number; // Coste/hora opcional del técnico
 }
 
-export interface StopFuelLegDetail {
+export interface StopRouteLegDetail {
   orderId: string;
   distanceFromPrevKm: number;
   drivingMinutesFromPrev: number;
-  carriedWeightKgBeforeUnload: number;
-  carriedSacksBeforeUnload: number;
-  legBaseFuelLiters: number;
-  legWeightExtraFuelLiters: number;
+  interventionMinutes: number;
+  cumulativeWorkdayMinutesAfterStop: number;
   legFuelLiters: number;
   legFuelCostEur: number;
 }
 
-export interface OptimizedGaliciaTrip<T = any> {
+export interface OptimizedFieldRoute<T = any> {
   tripNumber: number;
   orders: T[];
-  totalSacks: number;
-  occupancyPercent: number;
-  totalWeightKg: number;
-  totalDistanceKm: number;
+  totalStops: number;
+  totalInterventionMinutes: number;
   estimatedDrivingSeconds: number;
   estimatedDrivingMinutes: number;
-  baseFuelLiters: number;
-  weightExtraFuelLiters: number;
+  totalWorkdayMinutes: number; // Conducción + Intervenciones
+  occupancyPercent: number; // % de jornada máxima
+  totalDistanceKm: number;
   totalFuelLiters: number;
-  reverseDirectionFuelLiters: number;
-  heavyFirstSavedLiters: number;
   totalFuelCostEur: number;
-  costPerSackEur: number;
+  totalLaborCostEur: number;
+  costPerStopEur: number;
   urgentOrdersCount: number;
+  averiaCount: number;
+  revisionCount: number;
+  instalacionCount: number;
   tripRevenueEur: number;
   tripNetMarginEur: number;
   tripNetMarginPercent: number;
-  isHighCostPerSack: boolean;
-  highCostWarningReason?: string;
-  legDetails: StopFuelLegDetail[];
+  isOvertimeWarning: boolean;
+  warningReason?: string;
+  legDetails: StopRouteLegDetail[];
   returnLeg: {
     distanceKm: number;
     drivingMinutes: number;
@@ -61,38 +65,45 @@ export interface OptimizedGaliciaTrip<T = any> {
   };
 }
 
-export interface GaliciaRoutingResult<T = any> {
-  trips: OptimizedGaliciaTrip<T>[];
-  exceededCapacity: boolean;
-  totalSacks: number;
+export interface FieldRoutingResult<T = any> {
+  trips: OptimizedFieldRoute<T>[];
+  exceededWorkday: boolean;
   totalOrders: number;
+  totalInterventionMinutes: number;
+  totalDrivingMinutes: number;
+  totalWorkdayMinutes: number;
   usedRealOsrmTable: boolean;
   fromOsrmCache: boolean;
   totalDistanceKm: number;
-  totalDrivingMinutes: number;
-  totalBaseFuelLiters: number;
-  totalWeightExtraFuelLiters: number;
   totalFuelLiters: number;
-  totalHeavyFirstSavedLiters: number;
   totalFuelCostEur: number;
-  averageCostPerSackEur: number;
+  totalLaborCostEur: number;
+  averageCostPerStopEur: number;
   totalRevenueEur: number;
   totalNetMarginEur: number;
   interRouteSwapsApplied: number;
 }
 
-export const DEFAULT_FUEL_PARAMS: FuelOptimizationParams = {
-  consumoVacioL100: PELLET_GALICIA_RULES.DEFAULT_CONSUMO_VACIO_L100,
-  extraConsumoPorTonelada:
-    PELLET_GALICIA_RULES.DEFAULT_EXTRA_CONSUMO_TONELADA,
-  precioCombustible: PELLET_GALICIA_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
-  precioPorSaco: PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO,
+export const DEFAULT_FIELD_ROUTING_PARAMS: FieldRoutingParams = {
+  consumoL100: FIELD_SERVICE_RULES.DEFAULT_CONSUMO_L100,
+  precioCombustible: FIELD_SERVICE_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
+  hourlyCostEur: FIELD_SERVICE_RULES.DEFAULT_HOURLY_COST_EUR,
 };
 
-function getOrderCoordinates(order: RoutableOrder): Coordinates {
+function getOrderCoordinates(order: RoutableServiceOrder): Coordinates {
   if (order.customer?.coordinates) return order.customer.coordinates;
-  if (order.client?.coordinates) return order.client.coordinates;
   return { lat: 42.2982, lng: -7.8185 };
+}
+
+function getOrderMinutes(order: RoutableServiceOrder): number {
+  return Math.max(
+    5,
+    Math.min(
+      480,
+      Number(order.estimatedMinutes) ||
+        FIELD_SERVICE_RULES.DEFAULT_INTERVENTION_MINUTES
+    )
+  );
 }
 
 /**
@@ -130,7 +141,6 @@ function buildFallbackMatrices(allCoords: Coordinates[]): {
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
       if (i === j) continue;
-      // Primero intentar recuperar la distancia y duración real de carretera desde la caché OSRM de sesión
       const cachedPair = getCachedOsrmPairMetrics(allCoords[i], allCoords[j]);
       if (cachedPair) {
         distKm[i][j] = cachedPair.distanceMeters / 1000;
@@ -138,7 +148,6 @@ function buildFallbackMatrices(allCoords: Coordinates[]): {
       } else {
         const d = estimateRoadDistanceKm(allCoords[i], allCoords[j]);
         distKm[i][j] = d;
-        // Velocidad media rural en Galicia ~48 km/h
         durSec[i][j] = (d / 48) * 3600;
       }
     }
@@ -148,24 +157,22 @@ function buildFallbackMatrices(allCoords: Coordinates[]): {
 }
 
 /**
- * 3. FUNCIÓN DE COSTE DE COMBUSTIBLE CON PESO DINÁMICO ("Heavy-First Fuel Cost Function")
- *
- * En cada tramo A -> B, el furgón transporta `pesoActualKg` (sacos pendientes de descargar en ese viaje).
- * LitrosTramo = (DistanciaTramoKm / 100) * (consumoVacioL100 + (pesoActualKg / 1000) * extraConsumoPorTonelada)
+ * Evalúa una secuencia de avisos técnicos: km totales, tiempo de conducción,
+ * tiempo de intervención y coste de combustible.
  */
-function evaluateRouteDynamicFuel<T extends RoutableOrder>(
-  routeMatrixIndices: number[], // Índices en matriz (1..N)
+function evaluateFieldRoute<T extends RoutableServiceOrder>(
+  routeMatrixIndices: number[],
   orders: T[],
   distMatrixKm: number[][],
   durMatrixSec: number[][],
-  fuelParams: FuelOptimizationParams
+  params: FieldRoutingParams
 ): {
   totalDistanceKm: number;
   totalDrivingSeconds: number;
-  baseFuelLiters: number;
-  weightExtraFuelLiters: number;
+  totalInterventionMinutes: number;
+  totalWorkdayMinutes: number;
   totalFuelLiters: number;
-  legDetails: StopFuelLegDetail[];
+  legDetails: StopRouteLegDetail[];
   returnLeg: {
     distanceKm: number;
     drivingMinutes: number;
@@ -177,8 +184,8 @@ function evaluateRouteDynamicFuel<T extends RoutableOrder>(
     return {
       totalDistanceKm: 0,
       totalDrivingSeconds: 0,
-      baseFuelLiters: 0,
-      weightExtraFuelLiters: 0,
+      totalInterventionMinutes: 0,
+      totalWorkdayMinutes: 0,
       totalFuelLiters: 0,
       legDetails: [],
       returnLeg: {
@@ -190,221 +197,342 @@ function evaluateRouteDynamicFuel<T extends RoutableOrder>(
     };
   }
 
-  let remainingSacks = routeMatrixIndices.reduce(
-    (sum, idx) => sum + orders[idx - 1].sacks,
-    0
-  );
-  let pesoActualKg = remainingSacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG;
-
+  let prevIdx = 0;
   let totalDistanceKm = 0;
   let totalDrivingSeconds = 0;
-  let baseFuelLiters = 0;
-  let weightExtraFuelLiters = 0;
-  const legDetails: StopFuelLegDetail[] = [];
+  let totalInterventionMinutes = 0;
+  let totalFuelLiters = 0;
+  let cumulativeWorkMinutes = 0;
 
-  let prevNode = 0; // Sale del Almacén (nodo 0)
+  const legDetails: StopRouteLegDetail[] = [];
 
-  for (let i = 0; i < routeMatrixIndices.length; i++) {
-    const currNode = routeMatrixIndices[i];
-    const order = orders[currNode - 1];
+  for (const currIdx of routeMatrixIndices) {
+    const order = orders[currIdx - 1];
+    const distKm = distMatrixKm[prevIdx][currIdx] || 0;
+    const durSec = durMatrixSec[prevIdx][currIdx] || 0;
+    const driveMin = Math.max(1, Math.round(durSec / 60));
+    const interventionMin = getOrderMinutes(order);
 
-    const distKm = Math.max(0, distMatrixKm[prevNode]?.[currNode] ?? 0);
-    const durSec = Math.max(0, durMatrixSec[prevNode]?.[currNode] ?? 0);
-
-    const legBase = (distKm / 100) * fuelParams.consumoVacioL100;
-    const legWeightExtra =
-      (distKm / 100) *
-      (pesoActualKg / 1000) *
-      fuelParams.extraConsumoPorTonelada;
-    const legTotalLiters = legBase + legWeightExtra;
+    const legFuelLiters = (distKm / 100) * params.consumoL100;
+    const legFuelCostEur = legFuelLiters * params.precioCombustible;
 
     totalDistanceKm += distKm;
     totalDrivingSeconds += durSec;
-    baseFuelLiters += legBase;
-    weightExtraFuelLiters += legWeightExtra;
+    totalInterventionMinutes += interventionMin;
+    totalFuelLiters += legFuelLiters;
+    cumulativeWorkMinutes += driveMin + interventionMin;
 
     legDetails.push({
       orderId: order.id,
       distanceFromPrevKm: Number(distKm.toFixed(2)),
-      drivingMinutesFromPrev: Math.max(1, Math.round(durSec / 60)),
-      carriedWeightKgBeforeUnload: pesoActualKg,
-      carriedSacksBeforeUnload: remainingSacks,
-      legBaseFuelLiters: Number(legBase.toFixed(3)),
-      legWeightExtraFuelLiters: Number(legWeightExtra.toFixed(3)),
-      legFuelLiters: Number(legTotalLiters.toFixed(3)),
-      legFuelCostEur: Number(
-        (legTotalLiters * fuelParams.precioCombustible).toFixed(2)
-      ),
+      drivingMinutesFromPrev: driveMin,
+      interventionMinutes: interventionMin,
+      cumulativeWorkdayMinutesAfterStop: cumulativeWorkMinutes,
+      legFuelLiters: Number(legFuelLiters.toFixed(2)),
+      legFuelCostEur: Number(legFuelCostEur.toFixed(2)),
     });
 
-    // Descargar los sacos del cliente en esta parada
-    remainingSacks = Math.max(0, remainingSacks - order.sacks);
-    pesoActualKg = remainingSacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG;
-    prevNode = currNode;
+    prevIdx = currIdx;
   }
 
-  // Tramo de retorno al Almacén con el furgón ya descargado (pesoActualKg = 0)
-  const lastNode = routeMatrixIndices[routeMatrixIndices.length - 1];
-  const returnDistKm = Math.max(0, distMatrixKm[lastNode]?.[0] ?? 0);
-  const returnDurSec = Math.max(0, durMatrixSec[lastNode]?.[0] ?? 0);
-  const returnFuelLiters = (returnDistKm / 100) * fuelParams.consumoVacioL100;
+  const returnDistKm = distMatrixKm[prevIdx][0] || 0;
+  const returnDurSec = durMatrixSec[prevIdx][0] || 0;
+  const returnFuelLiters = (returnDistKm / 100) * params.consumoL100;
 
   totalDistanceKm += returnDistKm;
   totalDrivingSeconds += returnDurSec;
-  baseFuelLiters += returnFuelLiters;
+  totalFuelLiters += returnFuelLiters;
 
-  const totalFuelLiters = baseFuelLiters + weightExtraFuelLiters;
+  const totalDrivingMinutes = Math.max(1, Math.round(totalDrivingSeconds / 60));
+  const totalWorkdayMinutes = totalDrivingMinutes + totalInterventionMinutes;
 
   return {
     totalDistanceKm,
     totalDrivingSeconds,
-    baseFuelLiters,
-    weightExtraFuelLiters,
+    totalInterventionMinutes,
+    totalWorkdayMinutes,
     totalFuelLiters,
     legDetails,
     returnLeg: {
       distanceKm: Number(returnDistKm.toFixed(2)),
       drivingMinutes: Math.max(1, Math.round(returnDurSec / 60)),
-      fuelLiters: Number(returnFuelLiters.toFixed(3)),
+      fuelLiters: Number(returnFuelLiters.toFixed(2)),
       fuelCostEur: Number(
-        (returnFuelLiters * fuelParams.precioCombustible).toFixed(2)
+        (returnFuelLiters * params.precioCombustible).toFixed(2)
       ),
     },
   };
 }
 
+function estimateClusterTimeMinutes<T extends RoutableServiceOrder>(
+  indices: number[],
+  orders: T[],
+  durMatrixSec: number[][]
+): number {
+  if (indices.length === 0) return 0;
+  let driveSec = durMatrixSec[0][indices[0]] || 0;
+  let workMin = getOrderMinutes(orders[indices[0] - 1]);
+  for (let i = 1; i < indices.length; i++) {
+    driveSec += durMatrixSec[indices[i - 1]][indices[i]] || 0;
+    workMin += getOrderMinutes(orders[indices[i] - 1]);
+  }
+  driveSec += durMatrixSec[indices[indices.length - 1]][0] || 0;
+  return Math.round(driveSec / 60) + workMin;
+}
+
 /**
- * Optimiza la secuencia interna de un viaje minimizando los Litros Totales de Gasoil
- * (teniendo en cuenta el peso dinámico que se descarga en cada parada).
- *
- * Incluye:
- * - Semilla Nearest-Neighbor + Semilla Heavy-First (descargar sacos pesados antes)
- * - 2-Opt guiado por consumo de combustible
- * - Or-Opt / Relocate de paradas individuales (para adelantar paradas muy pesadas si ahorra gasoil)
- * - Evaluación de inversión del sentido completo del bucle (A->B->C vs C->B->A)
+ * Optimiza el orden de un único turno con 2-Opt respetando estrictamente
+ * que los avisos "Urgente" vayan al inicio del turno antes que los "Normal".
  */
-function optimizeSingleTripForMinimumFuel<T extends RoutableOrder>(
-  clientIndices: number[],
+function optimizeSingleShiftSequence<T extends RoutableServiceOrder>(
+  clusterIndices: number[],
+  orders: T[],
+  distMatrixKm: number[][],
+  durMatrixSec: number[][]
+): number[] {
+  if (clusterIndices.length <= 1) return [...clusterIndices];
+
+  const urgentIndices = clusterIndices.filter(
+    (idx) => orders[idx - 1]?.priority === "Urgente"
+  );
+  const normalIndices = clusterIndices.filter(
+    (idx) => orders[idx - 1]?.priority !== "Urgente"
+  );
+
+  // Sub-rutina Nearest Neighbor + 2-Opt desde un punto de partida hasta un punto de fin opcional
+  const optimizeBlock = (
+    block: number[],
+    startNode: number,
+    endNode: number | null
+  ): number[] => {
+    if (block.length <= 1) return [...block];
+    const remaining = new Set(block);
+    const ordered: number[] = [];
+    let current = startNode;
+
+    while (remaining.size > 0) {
+      let bestNext = -1;
+      let bestCost = Infinity;
+      for (const cand of remaining) {
+        const cost = durMatrixSec[current][cand] ?? distMatrixKm[current][cand];
+        if (cost < bestCost) {
+          bestCost = cost;
+          bestNext = cand;
+        }
+      }
+      if (bestNext === -1) break;
+      ordered.push(bestNext);
+      remaining.delete(bestNext);
+      current = bestNext;
+    }
+
+    // 2-Opt local sobre el bloque
+    const blockCost = (seq: number[]): number => {
+      let c = durMatrixSec[startNode][seq[0]] || 0;
+      for (let i = 0; i < seq.length - 1; i++) {
+        c += durMatrixSec[seq[i]][seq[i + 1]] || 0;
+      }
+      if (endNode !== null) {
+        c += durMatrixSec[seq[seq.length - 1]][endNode] || 0;
+      }
+      return c;
+    };
+
+    let improved = true;
+    let bestSeq = [...ordered];
+    let bestScore = blockCost(bestSeq);
+    let iters = 0;
+
+    while (improved && iters < 30) {
+      improved = false;
+      iters++;
+      for (let i = 0; i < bestSeq.length - 1; i++) {
+        for (let j = i + 1; j < bestSeq.length; j++) {
+          const cand = [
+            ...bestSeq.slice(0, i),
+            ...bestSeq.slice(i, j + 1).reverse(),
+            ...bestSeq.slice(j + 1),
+          ];
+          const candScore = blockCost(cand);
+          if (candScore + 1 < bestScore) {
+            bestSeq = cand;
+            bestScore = candScore;
+            improved = true;
+          }
+        }
+      }
+    }
+
+    return bestSeq;
+  };
+
+  if (urgentIndices.length > 0 && normalIndices.length > 0) {
+    const optUrgent = optimizeBlock(urgentIndices, 0, null);
+    const lastUrgent = optUrgent[optUrgent.length - 1];
+    const optNormal = optimizeBlock(normalIndices, lastUrgent, 0);
+    return [...optUrgent, ...optNormal];
+  }
+
+  return optimizeBlock(clusterIndices, 0, 0);
+}
+
+/**
+ * Agrupación Clarke-Wright Savings basada en Capacidad de Jornada (maxWorkdayMinutes y maxStopsPerRoute)
+ * garantizando que las Averías Urgentes entren primero en el Turno #1.
+ */
+function clarkeWrightTimeClustering<T extends RoutableServiceOrder>(
   orders: T[],
   distMatrixKm: number[][],
   durMatrixSec: number[][],
-  fuelParams: FuelOptimizationParams
-): number[] {
-  if (clientIndices.length <= 1) return [...clientIndices];
+  maxWorkdayMinutes: number,
+  maxStopsPerRoute: number
+): number[][] {
+  const n = orders.length;
+  if (n === 0) return [];
+  if (n === 1) return [[1]];
 
-  const getFuelCost = (seq: number[]) =>
-    evaluateRouteDynamicFuel(seq, orders, distMatrixKm, durMatrixSec, fuelParams)
-      .totalFuelLiters;
+  const routes: number[][] = [];
+  const routeOfClient = new Array<number>(n + 1).fill(-1);
 
-  // Semilla 1: Nearest Neighbor por distancia
-  const buildNearestNeighborSeed = (): number[] => {
-    const rem = new Set(clientIndices);
-    const route: number[] = [];
-    let curr = 0;
-    while (rem.size > 0) {
-      let best = -1;
-      let bestDist = Infinity;
-      for (const cand of rem) {
-        const d = distMatrixKm[curr][cand];
-        if (d < bestDist) {
-          bestDist = d;
-          best = cand;
-        }
-      }
-      if (best === -1) break;
-      route.push(best);
-      rem.delete(best);
-      curr = best;
+  for (let i = 1; i <= n; i++) {
+    routes.push([i]);
+    routeOfClient[i] = i - 1;
+  }
+
+  interface SavingPair {
+    i: number;
+    j: number;
+    saving: number;
+  }
+  const savings: SavingPair[] = [];
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = i + 1; j <= n; j++) {
+      // Bonus de ahorro si ambos son Urgentes para agruparlos juntos en el Turno #1
+      const bothUrgent =
+        orders[i - 1]?.priority === "Urgente" &&
+        orders[j - 1]?.priority === "Urgente";
+      const s =
+        (distMatrixKm[0][i] || 0) +
+        (distMatrixKm[0][j] || 0) -
+        (distMatrixKm[i][j] || 0) +
+        (bothUrgent ? 25 : 0);
+      savings.push({ i, j, saving: s });
     }
-    return route;
-  };
+  }
 
-  // Semilla 2: Heavy-First ponderado (prioriza descargar muchos sacos pronto sin desviarse en exceso)
-  const buildHeavyFirstSeed = (): number[] => {
-    const rem = new Set(clientIndices);
-    const route: number[] = [];
-    let curr = 0;
-    while (rem.size > 0) {
-      let best = -1;
-      let bestScore = Infinity;
-      for (const cand of rem) {
-        const d = Math.max(0.2, distMatrixKm[curr][cand]);
-        const sacks = Math.max(1, orders[cand - 1].sacks);
-        // Menor distancia y mayor cantidad de sacos -> mejor puntuación
-        const score = d / Math.pow(sacks, 0.35);
-        if (score < bestScore) {
-          bestScore = score;
-          best = cand;
-        }
-      }
-      if (best === -1) break;
-      route.push(best);
-      rem.delete(best);
-      curr = best;
+  savings.sort((a, b) => b.saving - a.saving);
+
+  for (const { i, j, saving } of savings) {
+    if (saving <= 0) break;
+
+    const rI = routeOfClient[i];
+    const rJ = routeOfClient[j];
+    if (rI === rJ) continue;
+
+    const routeI = routes[rI];
+    const routeJ = routes[rJ];
+    if (routeI.length === 0 || routeJ.length === 0) continue;
+    if (routeI.length + routeJ.length > maxStopsPerRoute) continue;
+
+    const iIsStart = routeI[0] === i;
+    const iIsEnd = routeI[routeI.length - 1] === i;
+    const jIsStart = routeJ[0] === j;
+    const jIsEnd = routeJ[routeJ.length - 1] === j;
+
+    if (!(iIsStart || iIsEnd) || !(jIsStart || jIsEnd)) continue;
+
+    const orientedI = iIsEnd ? [...routeI] : [...routeI].reverse();
+    const orientedJ = jIsStart ? [...routeJ] : [...routeJ].reverse();
+    const merged = [...orientedI, ...orientedJ];
+
+    const mergedTimeMin = estimateClusterTimeMinutes(merged, orders, durMatrixSec);
+    if (mergedTimeMin > maxWorkdayMinutes) continue;
+
+    routes[rI] = merged;
+    routes[rJ] = [];
+    for (const clientIdx of merged) {
+      routeOfClient[clientIdx] = rI;
     }
-    return route;
-  };
+  }
 
-  const candidates: number[][] = [
-    [...clientIndices],
-    [...clientIndices].reverse(),
-    buildNearestNeighborSeed(),
-    buildHeavyFirstSeed(),
-  ];
+  return routes.filter((r) => r.length > 0);
+}
 
-  let bestGlobalRoute = [...clientIndices];
-  let bestGlobalFuel = getFuelCost(bestGlobalRoute);
+/**
+ * Mejora Inter-Ruta (Swap & Relocate) para reducir tiempo total de conducción
+ * sin exceder maxWorkdayMinutes ni maxStopsPerRoute.
+ */
+function applyInterRouteTimeOptimization<T extends RoutableServiceOrder>(
+  initialTrips: number[][],
+  orders: T[],
+  distMatrixKm: number[][],
+  durMatrixSec: number[][],
+  maxWorkdayMinutes: number,
+  maxStopsPerRoute: number
+): { improvedTrips: number[][]; swapsCount: number } {
+  if (initialTrips.length <= 1) {
+    return { improvedTrips: initialTrips, swapsCount: 0 };
+  }
 
-  for (const seed of candidates) {
-    let route = [...seed];
-    let currentFuel = getFuelCost(route);
-    let improved = true;
-    let iter = 0;
+  let trips = initialTrips.map((t) => [...t]);
+  let swapsCount = 0;
 
-    while (improved && iter < 40) {
-      improved = false;
-      iter++;
+  for (let pass = 0; pass < 3; pass++) {
+    let improved = false;
 
-      // 1) Inversión completa del bucle (crucial para peso dinámico: ir en sentido horario vs antihorario)
-      const reversedLoop = [...route].reverse();
-      const reversedFuel = getFuelCost(reversedLoop);
-      if (reversedFuel < currentFuel - 0.0001) {
-        route = reversedLoop;
-        currentFuel = reversedFuel;
-        improved = true;
-      }
+    for (let rA = 0; rA < trips.length; rA++) {
+      for (let rB = rA + 1; rB < trips.length; rB++) {
+        if (trips[rA].length === 0 || trips[rB].length === 0) continue;
 
-      // 2) 2-Opt guiado por Litros de Combustible
-      for (let i = 0; i < route.length - 1; i++) {
-        for (let k = i + 1; k < route.length; k++) {
-          const candidate = [
-            ...route.slice(0, i),
-            ...route.slice(i, k + 1).reverse(),
-            ...route.slice(k + 1),
-          ];
-          const candFuel = getFuelCost(candidate);
-          if (candFuel < currentFuel - 0.0001) {
-            route = candidate;
-            currentFuel = candFuel;
-            improved = true;
-            break;
-          }
-        }
-        if (improved) break;
-      }
+        const baseTimeA = estimateClusterTimeMinutes(
+          trips[rA],
+          orders,
+          durMatrixSec
+        );
+        const baseTimeB = estimateClusterTimeMinutes(
+          trips[rB],
+          orders,
+          durMatrixSec
+        );
+        const currentCombined = baseTimeA + baseTimeB;
 
-      // 3) Or-Opt (Reubicar una parada pesada a una posición anterior o posterior)
-      if (!improved && route.length >= 3) {
-        for (let fromIdx = 0; fromIdx < route.length; fromIdx++) {
-          for (let toIdx = 0; toIdx < route.length; toIdx++) {
-            if (fromIdx === toIdx) continue;
-            const candidate = [...route];
-            const [moved] = candidate.splice(fromIdx, 1);
-            candidate.splice(toIdx, 0, moved);
-            const candFuel = getFuelCost(candidate);
-            if (candFuel < currentFuel - 0.0001) {
-              route = candidate;
-              currentFuel = candFuel;
+        // 1. Probar Swap 1-por-1 entre avisos del mismo nivel de prioridad
+        for (let idxA = 0; idxA < trips[rA].length; idxA++) {
+          for (let idxB = 0; idxB < trips[rB].length; idxB++) {
+            const cA = trips[rA][idxA];
+            const cB = trips[rB][idxB];
+            if (orders[cA - 1]?.priority !== orders[cB - 1]?.priority) continue;
+
+            const candA = [...trips[rA]];
+            const candB = [...trips[rB]];
+            candA[idxA] = cB;
+            candB[idxB] = cA;
+
+            const optA = optimizeSingleShiftSequence(
+              candA,
+              orders,
+              distMatrixKm,
+              durMatrixSec
+            );
+            const optB = optimizeSingleShiftSequence(
+              candB,
+              orders,
+              distMatrixKm,
+              durMatrixSec
+            );
+
+            const tA = estimateClusterTimeMinutes(optA, orders, durMatrixSec);
+            const tB = estimateClusterTimeMinutes(optB, orders, durMatrixSec);
+
+            if (
+              tA <= maxWorkdayMinutes &&
+              tB <= maxWorkdayMinutes &&
+              tA + tB < currentCombined - 2
+            ) {
+              trips[rA] = optA;
+              trips[rB] = optB;
+              swapsCount++;
               improved = true;
               break;
             }
@@ -414,282 +542,7 @@ function optimizeSingleTripForMinimumFuel<T extends RoutableOrder>(
       }
     }
 
-    if (currentFuel < bestGlobalFuel) {
-      bestGlobalFuel = currentFuel;
-      bestGlobalRoute = route;
-    }
-  }
-
-  return bestGlobalRoute;
-}
-
-/**
- * 2b. ALGORITMO DE AHORROS DE CLARKE-WRIGHT (Capacitated Vehicle Routing Problem - CVRP)
- *
- * Calcula S(i, j) = Dist(Almacen, i) + Dist(Almacen, j) - Dist(i, j)
- * Ordena los ahorros de mayor a menor y fusiona progresivamente los pedidos en rutas
- * respetando la capacidad máxima de sacos del furgón.
- */
-function clarkeWrightSavingsClustering<T extends RoutableOrder>(
-  orders: T[],
-  distMatrixKm: number[][],
-  vanCapacitySacks: number
-): number[][] {
-  const n = orders.length;
-  if (n === 0) return [];
-
-  // Inicialmente cada pedido i (1..n) está en su propia ruta individual
-  let routes: { stops: number[]; sacks: number }[] = orders.map((o, idx) => ({
-    stops: [idx + 1],
-    sacks: o.sacks,
-  }));
-
-  // Calcular matriz de ahorros S(i, j) para todos los pares (i, j)
-  interface SavingPair {
-    i: number;
-    j: number;
-    savingKm: number;
-  }
-
-  const savingsList: SavingPair[] = [];
-  for (let i = 1; i <= n; i++) {
-    for (let j = i + 1; j <= n; j++) {
-      const dist0i = distMatrixKm[0][i];
-      const dist0j = distMatrixKm[0][j];
-      const distij = distMatrixKm[i][j];
-      // Promedio simétrico para carreteras con sentidos únicos
-      const distji = distMatrixKm[j][i];
-      const avgBetween = (distij + distji) / 2;
-      const savingKm = dist0i + dist0j - avgBetween;
-      savingsList.push({ i, j, savingKm });
-    }
-  }
-
-  // Ordenar ahorros de mayor a menor
-  savingsList.sort((a, b) => b.savingKm - a.savingKm);
-
-  // Fase 1: Fusión paralela de extremos Clarke-Wright
-  for (const { i, j, savingKm } of savingsList) {
-    if (savingKm <= 0) break;
-
-    const rIdxI = routes.findIndex((r) => r.stops.includes(i));
-    const rIdxJ = routes.findIndex((r) => r.stops.includes(j));
-
-    if (rIdxI === -1 || rIdxJ === -1 || rIdxI === rIdxJ) continue;
-
-    const routeI = routes[rIdxI];
-    const routeJ = routes[rIdxJ];
-
-    if (routeI.sacks + routeJ.sacks > vanCapacitySacks) continue;
-
-    const iIsFirst = routeI.stops[0] === i;
-    const iIsLast = routeI.stops[routeI.stops.length - 1] === i;
-    const jIsFirst = routeJ.stops[0] === j;
-    const jIsLast = routeJ.stops[routeJ.stops.length - 1] === j;
-
-    // En Clarke-Wright clásico, fusionamos cuando ambos nodos son extremos exteriores de sus rutas
-    if ((iIsFirst || iIsLast) && (jIsFirst || jIsLast)) {
-      const orientedI = iIsLast ? [...routeI.stops] : [...routeI.stops].reverse();
-      const orientedJ = jIsFirst ? [...routeJ.stops] : [...routeJ.stops].reverse();
-
-      const mergedStops = [...orientedI, ...orientedJ];
-      const mergedSacks = routeI.sacks + routeJ.sacks;
-
-      routes[rIdxI] = { stops: mergedStops, sacks: mergedSacks };
-      routes.splice(rIdxJ, 1);
-    }
-  }
-
-  // Fase 2: Compactación adicional si quedan dos rutas pequeñas que caben juntas y ahorran viaje al almacén
-  let compacted = true;
-  while (compacted && routes.length > 1) {
-    compacted = false;
-    let bestMerge: { a: number; b: number; gain: number } | null = null;
-
-    for (let a = 0; a < routes.length; a++) {
-      for (let b = a + 1; b < routes.length; b++) {
-        if (routes[a].sacks + routes[b].sacks <= vanCapacitySacks) {
-          const lastA = routes[a].stops[routes[a].stops.length - 1];
-          const firstB = routes[b].stops[0];
-          const gain =
-            distMatrixKm[lastA][0] +
-            distMatrixKm[0][firstB] -
-            distMatrixKm[lastA][firstB];
-          if (gain > 0 && (!bestMerge || gain > bestMerge.gain)) {
-            bestMerge = { a, b, gain };
-          }
-        }
-      }
-    }
-
-    if (bestMerge) {
-      const { a, b } = bestMerge;
-      routes[a] = {
-        stops: [...routes[a].stops, ...routes[b].stops],
-        sacks: routes[a].sacks + routes[b].sacks,
-      };
-      routes.splice(b, 1);
-      compacted = true;
-    }
-  }
-
-  return routes.map((r) => r.stops);
-}
-
-/**
- * 2c. MEJORA INTER-ROUTE SWAP & RELOCATE (Intercambio 2-Opt entre Viajes)
- *
- * Comprueba si intercambiar un pedido fronterizo del Viaje A con otro del Viaje B
- * (o mover un pedido de un viaje a otro respetando vanCapacitySacks)
- * reduce el consumo total de combustible y los kilómetros combinados.
- */
-function applyInterRouteSwapImprovement<T extends RoutableOrder>(
-  initialTrips: number[][],
-  orders: T[],
-  distMatrixKm: number[][],
-  durMatrixSec: number[][],
-  vanCapacitySacks: number,
-  fuelParams: FuelOptimizationParams
-): { improvedTrips: number[][]; swapsCount: number } {
-  if (initialTrips.length <= 1) {
-    return { improvedTrips: initialTrips, swapsCount: 0 };
-  }
-
-  const trips = initialTrips.map((t) => [...t]);
-  const getTripSacks = (t: number[]) =>
-    t.reduce((sum, idx) => sum + orders[idx - 1].sacks, 0);
-  const getTripFuel = (t: number[]) => {
-    const opt = optimizeSingleTripForMinimumFuel(
-      t,
-      orders,
-      distMatrixKm,
-      durMatrixSec,
-      fuelParams
-    );
-    return {
-      seq: opt,
-      liters: evaluateRouteDynamicFuel(
-        opt,
-        orders,
-        distMatrixKm,
-        durMatrixSec,
-        fuelParams
-      ).totalFuelLiters,
-    };
-  };
-
-  let swapsCount = 0;
-  let improved = true;
-  let pass = 0;
-
-  while (improved && pass < 15) {
-    improved = false;
-    pass++;
-
-    for (let rA = 0; rA < trips.length; rA++) {
-      for (let rB = rA + 1; rB < trips.length; rB++) {
-        const tripA = trips[rA];
-        const tripB = trips[rB];
-        const sacksA = getTripSacks(tripA);
-        const sacksB = getTripSacks(tripB);
-
-        const baseEvalA = getTripFuel(tripA);
-        const baseEvalB = getTripFuel(tripB);
-        const currentCombinedFuel = baseEvalA.liters + baseEvalB.liters;
-
-        // 1) Probar Intercambio 1-a-1 (Swap) entre un pedido de tripA y otro de tripB
-        for (let i = 0; i < tripA.length; i++) {
-          for (let j = 0; j < tripB.length; j++) {
-            const nodeA = tripA[i];
-            const nodeB = tripB[j];
-            const sA = orders[nodeA - 1].sacks;
-            const sB = orders[nodeB - 1].sacks;
-
-            const newSacksA = sacksA - sA + sB;
-            const newSacksB = sacksB - sB + sA;
-
-            if (
-              newSacksA <= vanCapacitySacks &&
-              newSacksB <= vanCapacitySacks
-            ) {
-              const candA = [...tripA];
-              const candB = [...tripB];
-              candA[i] = nodeB;
-              candB[j] = nodeA;
-
-              const evalCandA = getTripFuel(candA);
-              const evalCandB = getTripFuel(candB);
-
-              if (
-                evalCandA.liters + evalCandB.liters <
-                currentCombinedFuel - 0.005
-              ) {
-                trips[rA] = evalCandA.seq;
-                trips[rB] = evalCandB.seq;
-                swapsCount++;
-                improved = true;
-                break;
-              }
-            }
-          }
-          if (improved) break;
-        }
-
-        if (improved) break;
-
-        // 2) Probar Reubicación 1-a-0 (Mover un pedido de tripA a tripB o viceversa si cabe y ahorra gasoil)
-        if (tripA.length > 1) {
-          for (let i = 0; i < tripA.length; i++) {
-            const nodeA = tripA[i];
-            const sA = orders[nodeA - 1].sacks;
-            if (sacksB + sA <= vanCapacitySacks) {
-              const candA = tripA.filter((_, idx) => idx !== i);
-              const candB = [...tripB, nodeA];
-              const evalCandA = getTripFuel(candA);
-              const evalCandB = getTripFuel(candB);
-
-              if (
-                evalCandA.liters + evalCandB.liters <
-                currentCombinedFuel - 0.005
-              ) {
-                trips[rA] = evalCandA.seq;
-                trips[rB] = evalCandB.seq;
-                swapsCount++;
-                improved = true;
-                break;
-              }
-            }
-          }
-        }
-
-        if (!improved && tripB.length > 1) {
-          for (let j = 0; j < tripB.length; j++) {
-            const nodeB = tripB[j];
-            const sB = orders[nodeB - 1].sacks;
-            if (sacksA + sB <= vanCapacitySacks) {
-              const candA = [...tripA, nodeB];
-              const candB = tripB.filter((_, idx) => idx !== j);
-              const evalCandA = getTripFuel(candA);
-              const evalCandB = getTripFuel(candB);
-
-              if (
-                evalCandA.liters + evalCandB.liters <
-                currentCombinedFuel - 0.005
-              ) {
-                trips[rA] = evalCandA.seq;
-                trips[rB] = evalCandB.seq;
-                swapsCount++;
-                improved = true;
-                break;
-              }
-            }
-          }
-        }
-
-        if (improved) break;
-      }
-      if (improved) break;
-    }
+    if (!improved) break;
   }
 
   return {
@@ -698,121 +551,110 @@ function applyInterRouteSwapImprovement<T extends RoutableOrder>(
   };
 }
 
-/**
- * Construye el objeto completo de métricas de un viaje (incluyendo comparativa de sentido inverso
- * y alertas de coste por saco).
- */
-function buildTripMetricsObject<T extends RoutableOrder>(
+function buildFieldTripMetricsObject<T extends RoutableServiceOrder>(
   tripNumber: number,
   sortedOrders: T[],
   sortedMatrixIndices: number[],
   allOrders: T[],
   distMatrixKm: number[][],
   durMatrixSec: number[][],
-  vanCapacitySacks: number,
-  fuelParams: FuelOptimizationParams
-): OptimizedGaliciaTrip<T> {
-  const forwardEval = evaluateRouteDynamicFuel(
+  maxWorkdayMinutes: number,
+  params: FieldRoutingParams
+): OptimizedFieldRoute<T> {
+  const evalRes = evaluateFieldRoute(
     sortedMatrixIndices,
     allOrders,
     distMatrixKm,
     durMatrixSec,
-    fuelParams
+    params
   );
 
-  const reverseIndices = [...sortedMatrixIndices].reverse();
-  const reverseEval = evaluateRouteDynamicFuel(
-    reverseIndices,
-    allOrders,
-    distMatrixKm,
-    durMatrixSec,
-    fuelParams
+  const occupancyPercent = Math.round(
+    (evalRes.totalWorkdayMinutes / Math.max(1, maxWorkdayMinutes)) * 100
   );
+  const totalFuelCostEur = evalRes.totalFuelLiters * params.precioCombustible;
+  const totalLaborCostEur =
+    params.hourlyCostEur && params.hourlyCostEur > 0
+      ? (evalRes.totalWorkdayMinutes / 60) * params.hourlyCostEur
+      : 0;
+  const totalCostEur = totalFuelCostEur + totalLaborCostEur;
+  const costPerStopEur =
+    sortedOrders.length > 0 ? totalCostEur / sortedOrders.length : 0;
 
-  const tripSacks = sortedOrders.reduce((sum, o) => sum + o.sacks, 0);
-  const occupancyPercent = Math.round((tripSacks / vanCapacitySacks) * 100);
-  const totalFuelCostEur =
-    forwardEval.totalFuelLiters * fuelParams.precioCombustible;
-  const costPerSackEur = tripSacks > 0 ? totalFuelCostEur / tripSacks : 0;
-  const heavyFirstSavedLiters = Math.max(
-    0,
-    reverseEval.totalFuelLiters - forwardEval.totalFuelLiters
-  );
-
-  // Detectar si este viaje dispara el coste por saco (pocos sacos o muy lejano)
-  let isHighCostPerSack = false;
-  let highCostWarningReason: string | undefined;
-
-  if (costPerSackEur > 0.25 || (occupancyPercent < 45 && forwardEval.totalDistanceKm > 25)) {
-    isHighCostPerSack = true;
-    if (occupancyPercent < 45) {
-      highCostWarningReason = `Viaje al ${occupancyPercent}% de carga (${tripSacks}/${vanCapacitySacks} sacos) para recorrer ${forwardEval.totalDistanceKm.toFixed(
-        1
-      )} km (${costPerSackEur.toFixed(
-        2
-      )} €/saco). Valora combinar estos pedidos otro día.`;
-    } else {
-      highCostWarningReason = `Distancia elevada (${forwardEval.totalDistanceKm.toFixed(
-        1
-      )} km) con coste de ${costPerSackEur.toFixed(2)} € de gasoil por saco.`;
-    }
-  }
-
-  const pricePerSack =
-    fuelParams.precioPorSaco ?? PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO;
   const urgentOrdersCount = sortedOrders.filter(
     (o) => o.priority === "Urgente"
   ).length;
-  const tripRevenueEur = Number((tripSacks * pricePerSack).toFixed(2));
-  const tripNetMarginEur = Number(
-    (tripRevenueEur - totalFuelCostEur).toFixed(2)
+  const averiaCount = sortedOrders.filter(
+    (o) => (o.serviceType || "Avería") === "Avería"
+  ).length;
+  const revisionCount = sortedOrders.filter(
+    (o) => o.serviceType === "Revisión"
+  ).length;
+  const instalacionCount = sortedOrders.filter(
+    (o) => o.serviceType === "Instalación"
+  ).length;
+
+  const tripRevenueEur = Number(
+    sortedOrders
+      .reduce(
+        (sum, o) => sum + (o.collectedPriceEur ?? o.estimatedPriceEur ?? 0),
+        0
+      )
+      .toFixed(2)
   );
+  const tripNetMarginEur = Number((tripRevenueEur - totalCostEur).toFixed(2));
   const tripNetMarginPercent =
     tripRevenueEur > 0
       ? Number(((tripNetMarginEur / tripRevenueEur) * 100).toFixed(1))
       : 0;
 
+  const isOvertimeWarning = evalRes.totalWorkdayMinutes > maxWorkdayMinutes;
+  const warningReason = isOvertimeWarning
+    ? `Este turno supera la jornada máxima (${evalRes.totalWorkdayMinutes} / ${maxWorkdayMinutes} min) por la duración de las intervenciones.`
+    : undefined;
+
   return {
     tripNumber,
     orders: sortedOrders,
-    totalSacks: tripSacks,
-    occupancyPercent,
-    totalWeightKg: tripSacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
-    totalDistanceKm: Number(forwardEval.totalDistanceKm.toFixed(2)),
-    estimatedDrivingSeconds: Math.round(forwardEval.totalDrivingSeconds),
+    totalStops: sortedOrders.length,
+    totalInterventionMinutes: evalRes.totalInterventionMinutes,
+    estimatedDrivingSeconds: Math.round(evalRes.totalDrivingSeconds),
     estimatedDrivingMinutes: Math.max(
       1,
-      Math.round(forwardEval.totalDrivingSeconds / 60)
+      Math.round(evalRes.totalDrivingSeconds / 60)
     ),
-    baseFuelLiters: Number(forwardEval.baseFuelLiters.toFixed(2)),
-    weightExtraFuelLiters: Number(forwardEval.weightExtraFuelLiters.toFixed(2)),
-    totalFuelLiters: Number(forwardEval.totalFuelLiters.toFixed(2)),
-    reverseDirectionFuelLiters: Number(reverseEval.totalFuelLiters.toFixed(2)),
-    heavyFirstSavedLiters: Number(heavyFirstSavedLiters.toFixed(3)),
+    totalWorkdayMinutes: evalRes.totalWorkdayMinutes,
+    occupancyPercent,
+    totalDistanceKm: Number(evalRes.totalDistanceKm.toFixed(2)),
+    totalFuelLiters: Number(evalRes.totalFuelLiters.toFixed(2)),
     totalFuelCostEur: Number(totalFuelCostEur.toFixed(2)),
-    costPerSackEur: Number(costPerSackEur.toFixed(2)),
+    totalLaborCostEur: Number(totalLaborCostEur.toFixed(2)),
+    costPerStopEur: Number(costPerStopEur.toFixed(2)),
     urgentOrdersCount,
+    averiaCount,
+    revisionCount,
+    instalacionCount,
     tripRevenueEur,
     tripNetMarginEur,
     tripNetMarginPercent,
-    isHighCostPerSack,
-    highCostWarningReason,
-    legDetails: forwardEval.legDetails,
-    returnLeg: forwardEval.returnLeg,
+    isOvertimeWarning,
+    warningReason,
+    legDetails: evalRes.legDetails,
+    returnLeg: evalRes.returnLeg,
   };
 }
 
 /**
- * Recalcula en tiempo real el consumo de gasoil y métricas de un viaje cuando el Admin
- * reordena paradas manualmente (Drag & Drop) o invierte el sentido de la ruta.
+ * Recalcula en tiempo real las métricas de un turno cuando el Coordinador
+ * reordena avisos (Drag & Drop) o invierte el sentido usando la caché OSRM real.
  */
-export function recalculateSingleTripMetricsSync<T extends RoutableOrder>(
+export function recalculateSingleFieldTripSync<T extends RoutableServiceOrder>(
   tripOrders: T[],
   tripNumber: number,
   warehouseCoords: Coordinates,
-  vanCapacitySacks: number,
-  fuelParams: FuelOptimizationParams = DEFAULT_FUEL_PARAMS
-): OptimizedGaliciaTrip<T> {
+  maxWorkdayMinutes: number,
+  params: FieldRoutingParams = DEFAULT_FIELD_ROUTING_PARAMS
+): OptimizedFieldRoute<T> {
   const allCoords = [
     warehouseCoords,
     ...tripOrders.map((o) => getOrderCoordinates(o)),
@@ -820,59 +662,55 @@ export function recalculateSingleTripMetricsSync<T extends RoutableOrder>(
   const { distKm, durSec } = buildFallbackMatrices(allCoords);
   const indices = tripOrders.map((_, i) => i + 1);
 
-  return buildTripMetricsObject(
+  return buildFieldTripMetricsObject(
     tripNumber,
     tripOrders,
     indices,
     tripOrders,
     distKm,
     durSec,
-    vanCapacitySacks,
-    fuelParams
+    maxWorkdayMinutes,
+    params
   );
 }
 
 /**
- * MOTOR PRINCIPAL DE OPTIMIZACIÓN AVANZADA DE MÍNIMO CONSUMO DE COMBUSTIBLE
- * (Clarke-Wright Savings CVRP + Inter-Route 2-Opt Swap + Peso Dinámico Heavy-First)
+ * MOTOR PRINCIPAL DE OPTIMIZACIÓN DE JORNADAS TÉCNICAS (SATRuta)
+ * (Clarke-Wright por Tiempo de Jornada + Priorización de Urgencias + 2-Opt OSRM)
  */
-export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
+export async function optimizeFieldServiceRoutes<T extends RoutableServiceOrder>(
   orders: T[],
   warehouseCoords: Coordinates,
-  vanCapacitySacks: number,
-  fuelParams: FuelOptimizationParams = DEFAULT_FUEL_PARAMS
-): Promise<GaliciaRoutingResult<T>> {
-  const totalSacks = orders.reduce((sum, o) => sum + o.sacks, 0);
-
+  maxWorkdayMinutes: number = FIELD_SERVICE_RULES.DEFAULT_MAX_WORKDAY_MINUTES,
+  maxStopsPerRoute: number = FIELD_SERVICE_RULES.DEFAULT_MAX_STOPS_PER_ROUTE,
+  params: FieldRoutingParams = DEFAULT_FIELD_ROUTING_PARAMS
+): Promise<FieldRoutingResult<T>> {
   if (orders.length === 0) {
     return {
       trips: [],
-      exceededCapacity: false,
-      totalSacks: 0,
+      exceededWorkday: false,
       totalOrders: 0,
+      totalInterventionMinutes: 0,
+      totalDrivingMinutes: 0,
+      totalWorkdayMinutes: 0,
       usedRealOsrmTable: false,
       fromOsrmCache: false,
       totalDistanceKm: 0,
-      totalDrivingMinutes: 0,
-      totalBaseFuelLiters: 0,
-      totalWeightExtraFuelLiters: 0,
       totalFuelLiters: 0,
-      totalHeavyFirstSavedLiters: 0,
       totalFuelCostEur: 0,
-      averageCostPerSackEur: 0,
+      totalLaborCostEur: 0,
+      averageCostPerStopEur: 0,
       totalRevenueEur: 0,
       totalNetMarginEur: 0,
       interRouteSwapsApplied: 0,
     };
   }
 
-  // Lista de coordenadas: Índice 0 = Almacén, Índices 1..N = Clientes
   const allCoords = [
     warehouseCoords,
     ...orders.map((o) => getOrderCoordinates(o)),
   ];
 
-  // 2a. Matriz real de distancias (m -> km) y tiempos (s) usando OSRM Table API (o caché local de pares)
   const osrmTable = await fetchOsrmTable(allCoords);
   const fallback = buildFallbackMatrices(allCoords);
 
@@ -906,76 +744,67 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
         )
       );
     } else {
-      // Estimar km desde duración OSRM si no viniera matriz de distancias
       distMatrixKm = durMatrixSec.map((row) =>
         row.map((sec) => (sec / 3600) * 50)
       );
     }
   }
 
-  // 2b. Algoritmo de Ahorros de Clarke-Wright (CVRP)
-  const cwTrips = clarkeWrightSavingsClustering(
-    orders,
-    distMatrixKm,
-    vanCapacitySacks
-  );
-
-  // Optimización inicial intra-ruta por Peso Dinámico
-  const initialOptimizedTrips = cwTrips.map((tripIndices) =>
-    optimizeSingleTripForMinimumFuel(
-      tripIndices,
-      orders,
-      distMatrixKm,
-      durMatrixSec,
-      fuelParams
-    )
-  );
-
-  // 2c. Fase de mejora Inter-Route Swap (Intercambio entre viajes para reducir km y litros globales)
-  const { improvedTrips, swapsCount } = applyInterRouteSwapImprovement(
-    initialOptimizedTrips,
+  const cwClusters = clarkeWrightTimeClustering(
     orders,
     distMatrixKm,
     durMatrixSec,
-    vanCapacitySacks,
-    fuelParams
+    maxWorkdayMinutes,
+    maxStopsPerRoute
   );
 
-  // 3. Optimización final por Peso Dinámico ("Heavy-First Fuel Cost Function") en cada viaje
-  const finalTripsUnsorted: OptimizedGaliciaTrip<T>[] = improvedTrips.map(
-    (tripClientIndices, idx) => {
-      const bestOrderIndices = optimizeSingleTripForMinimumFuel(
-        tripClientIndices,
+  const initialOptimized = cwClusters.map((cluster) =>
+    optimizeSingleShiftSequence(cluster, orders, distMatrixKm, durMatrixSec)
+  );
+
+  const { improvedTrips, swapsCount } = applyInterRouteTimeOptimization(
+    initialOptimized,
+    orders,
+    distMatrixKm,
+    durMatrixSec,
+    maxWorkdayMinutes,
+    maxStopsPerRoute
+  );
+
+  const finalUnsorted: OptimizedFieldRoute<T>[] = improvedTrips.map(
+    (cluster, idx) => {
+      const bestSeq = optimizeSingleShiftSequence(
+        cluster,
         orders,
         distMatrixKm,
-        durMatrixSec,
-        fuelParams
+        durMatrixSec
       );
-      const sortedOrders = bestOrderIndices.map(
-        (matrixIdx) => orders[matrixIdx - 1]
-      );
-
-      return buildTripMetricsObject(
+      const sortedOrders = bestSeq.map((matrixIdx) => orders[matrixIdx - 1]);
+      return buildFieldTripMetricsObject(
         idx + 1,
         sortedOrders,
-        bestOrderIndices,
+        bestSeq,
         orders,
         distMatrixKm,
         durMatrixSec,
-        vanCapacitySacks,
-        fuelParams
+        maxWorkdayMinutes,
+        params
       );
     }
   );
 
-  // Ordenar viajes priorizando primero los que tienen pedidos urgentes y luego los más llenos/eficientes
-  finalTripsUnsorted.sort((a, b) => {
+  // Ordenar turnos: primero los que tienen Averías Urgentes, luego los más completos
+  finalUnsorted.sort((a, b) => {
     if (b.urgentOrdersCount !== a.urgentOrdersCount) {
       return b.urgentOrdersCount - a.urgentOrdersCount;
     }
-    return b.totalSacks - a.totalSacks;
+    if (b.averiaCount !== a.averiaCount) {
+      return b.averiaCount - a.averiaCount;
+    }
+    return b.totalWorkdayMinutes - a.totalWorkdayMinutes;
   });
-  const trips = finalTripsUnsorted.map((t, idx) => ({
+
+  const trips = finalUnsorted.map((t, idx) => ({
     ...t,
     tripNumber: idx + 1,
   }));
@@ -987,45 +816,45 @@ export async function optimizeGaliciaRoutes<T extends RoutableOrder>(
     (sum, t) => sum + t.estimatedDrivingMinutes,
     0
   );
-  const totalBaseFuelLiters = Number(
-    trips.reduce((sum, t) => sum + t.baseFuelLiters, 0).toFixed(2)
+  const totalInterventionMinutes = trips.reduce(
+    (sum, t) => sum + t.totalInterventionMinutes,
+    0
   );
-  const totalWeightExtraFuelLiters = Number(
-    trips.reduce((sum, t) => sum + t.weightExtraFuelLiters, 0).toFixed(2)
-  );
+  const totalWorkdayMinutes = totalDrivingMinutes + totalInterventionMinutes;
   const totalFuelLiters = Number(
     trips.reduce((sum, t) => sum + t.totalFuelLiters, 0).toFixed(2)
   );
-  const totalHeavyFirstSavedLiters = Number(
-    trips.reduce((sum, t) => sum + t.heavyFirstSavedLiters, 0).toFixed(3)
-  );
   const totalFuelCostEur = Number(
-    (totalFuelLiters * fuelParams.precioCombustible).toFixed(2)
+    trips.reduce((sum, t) => sum + t.totalFuelCostEur, 0).toFixed(2)
   );
-  const averageCostPerSackEur =
-    totalSacks > 0 ? Number((totalFuelCostEur / totalSacks).toFixed(2)) : 0;
-  const pricePerSack =
-    fuelParams.precioPorSaco ?? PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO;
-  const totalRevenueEur = Number((totalSacks * pricePerSack).toFixed(2));
+  const totalLaborCostEur = Number(
+    trips.reduce((sum, t) => sum + t.totalLaborCostEur, 0).toFixed(2)
+  );
+  const averageCostPerStopEur =
+    orders.length > 0
+      ? Number(((totalFuelCostEur + totalLaborCostEur) / orders.length).toFixed(2))
+      : 0;
+  const totalRevenueEur = Number(
+    trips.reduce((sum, t) => sum + t.tripRevenueEur, 0).toFixed(2)
+  );
   const totalNetMarginEur = Number(
-    (totalRevenueEur - totalFuelCostEur).toFixed(2)
+    trips.reduce((sum, t) => sum + t.tripNetMarginEur, 0).toFixed(2)
   );
 
   return {
     trips,
-    exceededCapacity: totalSacks > vanCapacitySacks,
-    totalSacks,
+    exceededWorkday: trips.length > 1 || totalWorkdayMinutes > maxWorkdayMinutes,
     totalOrders: orders.length,
+    totalInterventionMinutes,
+    totalDrivingMinutes,
+    totalWorkdayMinutes,
     usedRealOsrmTable: usedRealOsrm,
     fromOsrmCache,
     totalDistanceKm,
-    totalDrivingMinutes,
-    totalBaseFuelLiters,
-    totalWeightExtraFuelLiters,
     totalFuelLiters,
-    totalHeavyFirstSavedLiters,
     totalFuelCostEur,
-    averageCostPerSackEur,
+    totalLaborCostEur,
+    averageCostPerStopEur,
     totalRevenueEur,
     totalNetMarginEur,
     interRouteSwapsApplied: swapsCount,

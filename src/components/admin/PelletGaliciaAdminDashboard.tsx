@@ -3,10 +3,11 @@
 import React, { useState, useEffect, useMemo } from "react";
 import {
   Customer,
-  PendingOrder,
+  ServiceOrder,
+  ServiceType,
   OrderPriority,
   DecodedReturnReceipt,
-  VanConfig,
+  TechnicianConfig,
 } from "@/types/pelletGalicia";
 import { galiciaStorage, BackupAlertStatus } from "@/services/galiciaStorage";
 import { estimateRoadDistanceKm } from "@/utils/galiciaRoutingEngine";
@@ -14,17 +15,15 @@ import CustomerOrdersTab from "@/components/admin/CustomerOrdersTab";
 import RoutePlannerTab from "@/components/admin/RoutePlannerTab";
 import ConfigBackupTab from "@/components/admin/ConfigBackupTab";
 import {
-  Truck,
-  Package,
+  Wrench,
+  ClipboardCheck,
   Route as RouteIcon,
   Settings,
   ExternalLink,
-  ShieldCheck,
   AlertTriangle,
   Download,
   Coins,
   Fuel,
-  Scale,
   TrendingUp,
   CheckCircle2,
 } from "lucide-react";
@@ -34,8 +33,10 @@ type AdminActiveTab = "orders" | "planner" | "config";
 export default function PelletGaliciaAdminDashboard() {
   const [activeTab, setActiveTab] = useState<AdminActiveTab>("orders");
   const [customers, setCustomers] = useState<Customer[]>([]);
-  const [orders, setOrders] = useState<PendingOrder[]>([]);
-  const [config, setConfig] = useState<VanConfig>(galiciaStorage.getConfig());
+  const [orders, setOrders] = useState<ServiceOrder[]>([]);
+  const [config, setConfig] = useState<TechnicianConfig>(
+    galiciaStorage.getConfig()
+  );
   const [backupStatus, setBackupStatus] = useState<BackupAlertStatus>({
     lastBackupAt: null,
     daysSinceBackup: null,
@@ -96,33 +97,41 @@ export default function PelletGaliciaAdminDashboard() {
 
   const handleSaveOrder = (
     customerId: string,
-    sacks: number,
-    notes?: string,
-    priority: OrderPriority = "Normal"
+    payload: {
+      serviceType?: ServiceType;
+      priority?: OrderPriority;
+      equipmentInfo?: string;
+      estimatedMinutes?: number;
+      estimatedPriceEur?: number;
+      technicalNotes?: string;
+    }
   ) => {
-    galiciaStorage.saveOrder(customerId, sacks, notes, priority);
+    galiciaStorage.saveOrder(customerId, payload);
     refreshAll();
   };
 
   const handleUpdateOrder = (
     orderId: string,
     updates: {
-      sacks?: number;
-      orderNotes?: string;
+      serviceType?: ServiceType;
       priority?: OrderPriority;
-      status?: PendingOrder["status"];
+      equipmentInfo?: string;
+      estimatedMinutes?: number;
+      estimatedPriceEur?: number;
+      technicalNotes?: string;
+      status?: ServiceOrder["status"];
     }
   ) => {
     galiciaStorage.updateOrder(orderId, updates);
     refreshAll();
   };
 
-  const handleUpdateOrderSacks = (
+  const handleUpdateOrderDuration = (
     orderId: string,
     deltaOrExact: number,
     isDelta = false
   ) => {
-    galiciaStorage.updateOrderSacks(orderId, deltaOrExact, isDelta);
+    galiciaStorage.updateOrderDuration(orderId, deltaOrExact, isDelta);
     refreshAll();
   };
 
@@ -131,21 +140,26 @@ export default function PelletGaliciaAdminDashboard() {
     refreshAll();
   };
 
-  const handleUpdateOrderStatus = (id: string, status: PendingOrder["status"]) => {
+  const handleUpdateOrderStatus = (
+    id: string,
+    status: ServiceOrder["status"]
+  ) => {
     galiciaStorage.updateOrderStatus(id, status);
     refreshAll();
   };
 
-  const handleMarkDelivered = (orderIds: string[]) => {
-    galiciaStorage.markOrdersAsDelivered(orderIds);
+  const handleMarkCompleted = (orderIds: string[]) => {
+    galiciaStorage.markOrdersCompleted(orderIds);
     refreshAll();
-    showToast(`✅ ${orderIds.length} paradas marcadas como entregadas`);
+    showToast(`✅ ${orderIds.length} partes marcados como completados`);
   };
 
-  const handleMarkInDelivery = (orderIds: string[]) => {
-    galiciaStorage.markOrdersInDelivery(orderIds);
+  const handleMarkInRoute = (orderIds: string[]) => {
+    galiciaStorage.markOrdersInRoute(orderIds);
     refreshAll();
-    showToast(`🚀 Viaje despachado (${orderIds.length} pedidos en estado 'En Reparto')`);
+    showToast(
+      `🚐 Turno despachado (${orderIds.length} avisos en estado 'En Ruta')`
+    );
   };
 
   const handleReconcileReturnReceipt = (receipt: DecodedReturnReceipt) => {
@@ -153,13 +167,13 @@ export default function PelletGaliciaAdminDashboard() {
     refreshAll();
     if (res.matchedOrderIds.length > 0) {
       showToast(
-        `📥 Cierre conciliado: ${res.matchedOrderIds.length} entregas (${res.totalSacksUpdated} sacos · ${res.totalCashRecordedEur.toFixed(2)} € cobrados)`
+        `📥 Cierre SAT conciliado: ${res.matchedOrderIds.length} partes (${res.totalMinutesRecorded} min · ${res.totalCashRecordedEur.toFixed(2)} € cobrados)`
       );
     }
     return res;
   };
 
-  const handleSaveConfig = (partial: Partial<VanConfig>) => {
+  const handleSaveConfig = (partial: Partial<TechnicianConfig>) => {
     galiciaStorage.saveConfig(partial);
     refreshAll();
   };
@@ -172,7 +186,7 @@ export default function PelletGaliciaAdminDashboard() {
       const a = document.createElement("a");
       const dateStr = new Date().toISOString().split("T")[0];
       a.href = url;
-      a.download = `PelletGalicia_Backup_${dateStr}.json`;
+      a.download = `SATRuta_Backup_${dateStr}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -185,72 +199,74 @@ export default function PelletGaliciaAdminDashboard() {
   };
 
   const pendingOrders = orders.filter(
-    (o) => o.status === "Pendiente" || o.status === "En Reparto"
+    (o) => o.status === "Pendiente" || o.status === "En Ruta"
   );
-  const deliveredOrders = orders.filter((o) => o.status === "Completado");
+  const completedOrders = orders.filter((o) => o.status === "Completado");
 
-  // 5. Métricas de Resumen de Campaña
-  const campaignSummary = useMemo(() => {
-    const deliveredSacks = deliveredOrders.reduce((s, o) => s + o.sacks, 0);
-    const pendingSacks = pendingOrders.reduce((s, o) => s + o.sacks, 0);
-    const totalCampaignSacks = deliveredSacks + pendingSacks;
-    const deliveredTons = (deliveredSacks * 15) / 1000;
-    const totalCampaignTons = (totalCampaignSacks * 15) / 1000;
+  // Métricas globales de actividad SAT
+  const satSummary = useMemo(() => {
+    const urgentActiveCount = pendingOrders.filter(
+      (o) => o.priority === "Urgente"
+    ).length;
 
-    const pricePerSack = config.precioPorSaco ?? 4.5;
-    const deliveredRevenueEur = deliveredSacks * pricePerSack;
-    const totalCampaignRevenueEur = totalCampaignSacks * pricePerSack;
+    const completedRevenueEur = completedOrders.reduce(
+      (s, o) => s + (o.collectedPriceEur ?? o.estimatedPriceEur ?? 0),
+      0
+    );
+    const pendingRevenueEur = pendingOrders.reduce(
+      (s, o) => s + (o.estimatedPriceEur ?? 0),
+      0
+    );
+    const totalEstimatedRevenueEur = completedRevenueEur + pendingRevenueEur;
 
-    const baseL100 = config.consumoVacioL100 ?? 8.5;
-    const extraL100PerTon = config.extraConsumoPorTonelada ?? 2.2;
+    const consumoL100 = config.consumoL100 ?? 7.5;
     const dieselPrice = config.precioCombustible ?? 1.55;
+    const hourlyCost = config.hourlyCostEur ?? 0;
 
-    // Estimación realista de coste de combustible acumulado sobre pedidos de la campaña
-    let estFuelLiters = 0;
+    let estRoadKm = 0;
+    let totalWorkMinutes = 0;
     orders.forEach((o) => {
       const oneWayKm = estimateRoadDistanceKm(
         config.warehouseCoordinates,
         o.customer.coordinates
       );
-      // En rutas agrupadas cada parada supone ~1.15x su distancia directa prorrateada
-      const effectiveKm = Math.max(2, oneWayKm * 1.15);
-      const weightTons = (o.sacks * 15) / 1000;
-      const rateL100 = baseL100 + weightTons * extraL100PerTon;
-      estFuelLiters += (effectiveKm / 100) * rateL100;
+      estRoadKm += Math.max(2, oneWayKm * 1.15);
+      totalWorkMinutes += o.actualMinutes ?? o.estimatedMinutes ?? 45;
     });
 
+    const estFuelLiters = (estRoadKm / 100) * consumoL100;
     const estFuelCostEur = estFuelLiters * dieselPrice;
-    const netMarginDeliveredEur = Number(
-      (deliveredRevenueEur - estFuelCostEur).toFixed(2)
+    const estLaborCostEur =
+      hourlyCost > 0 ? (totalWorkMinutes / 60) * hourlyCost : 0;
+
+    const netMarginCompletedEur = Number(
+      (completedRevenueEur - estFuelCostEur - estLaborCostEur).toFixed(2)
     );
-    const netMarginTotalCampaignEur = Number(
-      (totalCampaignRevenueEur - estFuelCostEur).toFixed(2)
+    const netMarginTotalEur = Number(
+      (totalEstimatedRevenueEur - estFuelCostEur - estLaborCostEur).toFixed(2)
     );
     const marginPercent =
-      totalCampaignRevenueEur > 0
+      totalEstimatedRevenueEur > 0
         ? Math.max(
             0,
-            Math.round(
-              (netMarginTotalCampaignEur / totalCampaignRevenueEur) * 100
-            )
+            Math.round((netMarginTotalEur / totalEstimatedRevenueEur) * 100)
           )
         : 0;
 
     return {
-      deliveredSacks,
-      deliveredTons: Number(deliveredTons.toFixed(2)),
-      totalCampaignSacks,
-      totalCampaignTons: Number(totalCampaignTons.toFixed(2)),
-      deliveredRevenueEur: Number(deliveredRevenueEur.toFixed(2)),
-      totalCampaignRevenueEur: Number(totalCampaignRevenueEur.toFixed(2)),
+      activeCount: pendingOrders.length,
+      completedCount: completedOrders.length,
+      urgentActiveCount,
+      completedRevenueEur: Number(completedRevenueEur.toFixed(2)),
+      totalEstimatedRevenueEur: Number(totalEstimatedRevenueEur.toFixed(2)),
+      estRoadKm: Math.round(estRoadKm),
       estFuelLiters: Number(estFuelLiters.toFixed(1)),
       estFuelCostEur: Number(estFuelCostEur.toFixed(2)),
-      netMarginDeliveredEur,
-      netMarginTotalCampaignEur,
+      netMarginCompletedEur,
+      netMarginTotalEur,
       marginPercent,
-      pricePerSack,
     };
-  }, [orders, deliveredOrders, pendingOrders, config]);
+  }, [orders, completedOrders, pendingOrders, config]);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans print:bg-white print:text-slate-950">
@@ -258,25 +274,24 @@ export default function PelletGaliciaAdminDashboard() {
       <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-30 px-4 sm:px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 print:hidden">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 shadow-lg shadow-amber-500/20 font-black">
-            <Truck className="w-5 h-5" />
+            <Wrench className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-black tracking-tight text-white">
-                Pellet<span className="text-amber-400">Galicia</span>
+                SAT<span className="text-amber-400">Ruta</span>
               </h1>
               <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                 Zero-Cloud
               </span>
             </div>
             <p className="text-[11px] text-slate-400">
-              Reparto Rural en Furgón • Local-First
+              Asistencia Técnica en Campo • Averías y Revisiones • Local-First
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {/* 5. ALERTA DISCRETA EN CABECERA CUANDO HACE FALTA COPIA DE SEGURIDAD */}
           {isLoaded && backupStatus.needsBackupAlert && (
             <button
               type="button"
@@ -291,88 +306,92 @@ export default function PelletGaliciaAdminDashboard() {
           )}
 
           <a
-            href="/reparto"
+            href="/tecnico"
             target="_blank"
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-2xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-black text-xs transition shadow-md shadow-amber-600/20"
           >
-            <span>Ver Móvil /reparto</span>
+            <span>Ver Terminal /tecnico</span>
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </div>
       </header>
 
-      {/* CUERPO PRINCIPAL CON 3 PESTAÑAS */}
+      {/* CUERPO PRINCIPAL */}
       <main className="max-w-6xl w-full mx-auto p-4 sm:p-6 space-y-5 flex-1">
-        {/* 5. BARRA DE RESUMEN DE CAMPAÑA (4 KPIs INCLUYENDO MARGEN NETO) */}
+        {/* BARRA DE 4 KPIs SAT */}
         {isLoaded && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-900/90 border border-slate-800 p-3.5 rounded-3xl shadow-lg print:hidden">
-            {/* Métrica 1: Total Sacos Entregados (y Toneladas) */}
+            {/* KPI 1: Avisos Activos / Completados */}
             <div className="flex items-center gap-3 p-2.5 rounded-2xl bg-slate-950/80 border border-slate-800/90">
               <div className="p-2.5 rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0">
-                <Scale className="w-4 h-4" />
+                <ClipboardCheck className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Total Sacos Entregados
+                  Avisos Activos / Cerrados
                 </span>
                 <div className="text-sm font-black text-white truncate">
-                  {campaignSummary.deliveredSacks} sacos{" "}
-                  <span className="text-amber-400 font-mono text-xs">
-                    ({campaignSummary.deliveredTons} t)
-                  </span>
+                  {satSummary.activeCount} activos · {satSummary.completedCount} cerrados
                 </div>
-                <span className="text-[10px] text-slate-400 block truncate">
-                  En cola + entregados: {campaignSummary.totalCampaignSacks} (
-                  {campaignSummary.totalCampaignTons} t)
+                <span
+                  className={`text-[10px] block truncate font-bold ${
+                    satSummary.urgentActiveCount > 0
+                      ? "text-rose-400"
+                      : "text-slate-400"
+                  }`}
+                >
+                  {satSummary.urgentActiveCount > 0
+                    ? `🚨 ${satSummary.urgentActiveCount} averías urgentes en cola`
+                    : `Cartera: ${customers.length} clientes / equipos`}
                 </span>
               </div>
             </div>
 
-            {/* Métrica 2: Ingresos Totales */}
+            {/* KPI 2: Facturación Estimada */}
             <div className="flex items-center gap-3 p-2.5 rounded-2xl bg-slate-950/80 border border-slate-800/90">
               <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
                 <Coins className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Ingresos Brutos Campaña
+                  Facturación Estimada
                 </span>
                 <div className="text-sm font-black text-emerald-400 truncate">
-                  {campaignSummary.deliveredRevenueEur.toLocaleString("es-ES", {
+                  {satSummary.completedRevenueEur.toLocaleString("es-ES", {
                     minimumFractionDigits: 2,
                   })}{" "}
                   €{" "}
                   <span className="text-[10px] text-slate-400 font-normal">
-                    entregados
+                    cobrados
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-400 block truncate">
                   Total c/ cola:{" "}
-                  {campaignSummary.totalCampaignRevenueEur.toLocaleString("es-ES", {
+                  {satSummary.totalEstimatedRevenueEur.toLocaleString("es-ES", {
                     minimumFractionDigits: 2,
                   })}{" "}
-                  € ({campaignSummary.pricePerSack.toFixed(2)} €/saco)
+                  € previstos
                 </span>
               </div>
             </div>
 
-            {/* Métrica 3: Coste de Combustible Estimado */}
+            {/* KPI 3: Coste Desplazamiento */}
             <div className="flex items-center gap-3 p-2.5 rounded-2xl bg-slate-950/80 border border-slate-800/90">
               <div className="p-2.5 rounded-xl bg-sky-500/15 text-sky-400 border border-sky-500/30 shrink-0">
                 <Fuel className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                  Coste Gasoil Estimado
+                  Coste Desplazamiento Est.
                 </span>
                 <div className="text-sm font-black text-sky-400 truncate">
-                  {campaignSummary.estFuelCostEur.toFixed(2)} €{" "}
+                  {satSummary.estFuelCostEur.toFixed(2)} €{" "}
                   <span className="text-xs text-slate-300 font-mono">
-                    (~{campaignSummary.estFuelLiters} L)
+                    (~{satSummary.estRoadKm} km)
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-400 block truncate">
-                  Cartera: {customers.length} cli. • Backup:{" "}
+                  {satSummary.estFuelLiters} L est. • Backup:{" "}
                   {backupStatus.lastBackupAt
                     ? `hace ${backupStatus.daysSinceBackup ?? 0}d`
                     : "pendiente"}
@@ -380,7 +399,7 @@ export default function PelletGaliciaAdminDashboard() {
               </div>
             </div>
 
-            {/* Métrica 4: Margen Neto Estimado (Ingresos - Gasoil) */}
+            {/* KPI 4: Margen Neto Estimado */}
             <div className="flex items-center gap-3 p-2.5 rounded-2xl bg-slate-950/80 border border-emerald-500/30">
               <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shrink-0">
                 <TrendingUp className="w-4 h-4" />
@@ -390,22 +409,21 @@ export default function PelletGaliciaAdminDashboard() {
                   <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                     Margen Neto Est.
                   </span>
-                  {campaignSummary.marginPercent > 0 && (
+                  {satSummary.marginPercent > 0 && (
                     <span className="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 font-mono text-[9px] font-black">
-                      {campaignSummary.marginPercent}%
+                      {satSummary.marginPercent}%
                     </span>
                   )}
                 </div>
                 <div className="text-sm font-black text-emerald-400 truncate">
-                  {campaignSummary.netMarginTotalCampaignEur.toLocaleString(
-                    "es-ES",
-                    { minimumFractionDigits: 2 }
-                  )}{" "}
+                  {satSummary.netMarginTotalEur.toLocaleString("es-ES", {
+                    minimumFractionDigits: 2,
+                  })}{" "}
                   €
                 </div>
                 <span className="text-[10px] text-slate-400 block truncate">
-                  Ya entregado neto:{" "}
-                  {campaignSummary.netMarginDeliveredEur.toFixed(2)} €
+                  Ya cerrado neto:{" "}
+                  {satSummary.netMarginCompletedEur.toFixed(2)} €
                 </span>
               </div>
             </div>
@@ -415,7 +433,6 @@ export default function PelletGaliciaAdminDashboard() {
         {/* NAVEGACIÓN ENTRE LAS 3 PESTAÑAS */}
         <div className="flex items-center justify-between border-b border-slate-800 pb-3 print:hidden">
           <div className="flex flex-wrap rounded-2xl bg-slate-900 border border-slate-800 p-1 gap-1">
-            {/* Pestaña 1: Pedidos y Clientes */}
             <button
               type="button"
               onClick={() => setActiveTab("orders")}
@@ -425,8 +442,8 @@ export default function PelletGaliciaAdminDashboard() {
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              <Package className="w-4 h-4" />
-              <span>Pedidos y Clientes</span>
+              <ClipboardCheck className="w-4 h-4" />
+              <span>Avisos y Clientes</span>
               <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300">
                 {pendingOrders.length}
               </span>
@@ -435,7 +452,6 @@ export default function PelletGaliciaAdminDashboard() {
               </kbd>
             </button>
 
-            {/* Pestaña 2: Planificador de Rutas */}
             <button
               type="button"
               onClick={() => setActiveTab("planner")}
@@ -446,7 +462,7 @@ export default function PelletGaliciaAdminDashboard() {
               }`}
             >
               <RouteIcon className="w-4 h-4" />
-              <span>Planificador de Rutas</span>
+              <span>Planificador de Jornadas</span>
               <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-slate-800 text-amber-400 font-bold">
                 OSRM + Satélite
               </span>
@@ -455,7 +471,6 @@ export default function PelletGaliciaAdminDashboard() {
               </kbd>
             </button>
 
-            {/* Pestaña 3: Configuración y Backup */}
             <button
               type="button"
               onClick={() => setActiveTab("config")}
@@ -477,7 +492,7 @@ export default function PelletGaliciaAdminDashboard() {
         {/* RENDERIZADO DINÁMICO */}
         {!isLoaded ? (
           <div className="p-12 text-center text-slate-500 text-xs">
-            Cargando base de datos local de PelletGalicia...
+            Cargando base de datos local de SATRuta...
           </div>
         ) : (
           <>
@@ -485,12 +500,12 @@ export default function PelletGaliciaAdminDashboard() {
               <CustomerOrdersTab
                 customers={customers}
                 orders={orders}
-                vanCapacitySacks={config.vanCapacitySacks}
+                maxWorkdayMinutes={config.maxWorkdayMinutes}
                 onSaveCustomer={handleSaveCustomer}
                 onDeleteCustomer={handleDeleteCustomer}
                 onSaveOrder={handleSaveOrder}
                 onUpdateOrder={handleUpdateOrder}
-                onUpdateOrderSacks={handleUpdateOrderSacks}
+                onUpdateOrderDuration={handleUpdateOrderDuration}
                 onDeleteOrder={handleDeleteOrder}
                 onUpdateOrderStatus={handleUpdateOrderStatus}
               />
@@ -500,8 +515,8 @@ export default function PelletGaliciaAdminDashboard() {
               <RoutePlannerTab
                 orders={orders}
                 config={config}
-                onMarkDelivered={handleMarkDelivered}
-                onMarkInDelivery={handleMarkInDelivery}
+                onMarkCompleted={handleMarkCompleted}
+                onMarkInRoute={handleMarkInRoute}
                 onReconcileReturnReceipt={handleReconcileReturnReceipt}
               />
             )}
@@ -526,8 +541,8 @@ export default function PelletGaliciaAdminDashboard() {
       )}
 
       {/* PIE DE PÁGINA */}
-      <footer className="border-t border-slate-900 px-6 py-4 text-center text-[11px] text-slate-500">
-        PelletGalicia • Arquitectura Local-First & Zero-Cloud • OSRM + Satélite Esri
+      <footer className="border-t border-slate-900 px-6 py-4 text-center text-[11px] text-slate-500 print:hidden">
+        SATRuta • Asistencia Técnica en Campo (Averías y Revisiones) • Local-First & Zero-Cloud
       </footer>
     </div>
   );

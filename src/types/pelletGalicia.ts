@@ -1,14 +1,15 @@
 /**
- * Reglas de negocio y constantes de PelletGalicia
- * Reparto exclusivo en furgón por sacos sueltos de 15 kg por el rural de Galicia.
+ * Reglas de negocio y constantes de SATRuta (Asistencia Técnica en Campo: Averías, Revisiones e Instalaciones)
+ * Arquitectura Local-First & Zero-Cloud.
  */
-export const PELLET_GALICIA_RULES = {
-  SACK_WEIGHT_KG: 15,
-  DEFAULT_VAN_CAPACITY_SACKS: 90, // 90 sacos = 1.350 kg
-  DEFAULT_CONSUMO_VACIO_L100: 8.5, // 8.5 L/100km furgón vacío
-  DEFAULT_EXTRA_CONSUMO_TONELADA: 2.2, // +2.2 L/100km por cada 1.000 kg de carga
-  DEFAULT_PRECIO_COMBUSTIBLE: 1.55, // 1.55 €/L diésel
-  DEFAULT_PRECIO_POR_SACO: 4.5, // 4.50 € por saco de 15 kg por defecto
+export const FIELD_SERVICE_RULES = {
+  DEFAULT_MAX_WORKDAY_MINUTES: 480, // 8 horas de jornada (conducción + intervenciones)
+  DEFAULT_MAX_STOPS_PER_ROUTE: 12, // Límite operativo por defecto de avisos por turno
+  DEFAULT_INTERVENTION_MINUTES: 45, // Duración estimada por defecto (min)
+  DEFAULT_START_TIME: "08:30", // Hora de inicio de jornada
+  DEFAULT_CONSUMO_L100: 7.5, // Consumo medio furgoneta taller (L/100km)
+  DEFAULT_PRECIO_COMBUSTIBLE: 1.55, // Precio diésel/gasolina (€/L)
+  DEFAULT_HOURLY_COST_EUR: 0, // Coste interno por hora opcional (0 = solo combustible)
 } as const;
 
 export interface Coordinates {
@@ -16,94 +17,72 @@ export interface Coordinates {
   lng: number;
 }
 
+export type ServiceType = "Avería" | "Revisión" | "Instalación";
+export type OrderPriority = "Urgente" | "Normal";
+export type ServiceStatus = "Pendiente" | "En Ruta" | "Completado" | "Cancelado";
+
 /**
- * Cliente / Aldea guardado en la base de datos local (Local-First).
+ * Cliente / Ubicación / Instalación guardado en la base de datos local (Local-First).
  */
 export interface Customer {
   id: string;
   name: string;
-  village: string; // Aldea, Lugar, Parroquia, Concello o referencia
+  village: string; // Dirección, aldea, parroquia o referencia
   phone?: string;
   coordinates: Coordinates;
-  internalNotes?: string; // Notas habituales de descarga (ej. "Entrada por el hórreo", "Portón metálico verde")
-  ultimosSacos?: number; // Cantidad de sacos de su último pedido (ej. 30)
-  fechaUltimoPedido?: string; // Fecha ISO de la última vez que pidió
-  totalPedidosHistorico?: number; // Acumulado de cuántos pedidos nos ha comprado en total
-  totalSacosHistorico?: number; // Acumulado de cuántos sacos nos ha comprado en total
+  equipmentInfo?: string; // Ej. "Caldera Biomasa Domusa 25kW", "Grupo presión pozo"
+  internalNotes?: string; // Notas de acceso: llaves, perro, cuadro eléctrico, portón
+  lastServiceType?: ServiceType;
+  lastInterventionMinutes?: number;
+  lastServiceDate?: string; // Fecha ISO del último parte
+  totalServicesHistory?: number;
+  totalBilledHistoryEur?: number;
   createdAt: string;
   updatedAt: string;
 }
 
-export type OrderPriority = "Normal" | "Urgente";
-
-export type OrderStatus =
-  | "Pendiente"
-  | "En Reparto"
-  | "Completado"
-  | "Cancelado";
-
 /**
- * Pedido pendiente o en ciclo de entrega.
+ * Parte / Aviso de Trabajo (Avería, Revisión o Instalación).
  */
-export interface PendingOrder {
+export interface ServiceOrder {
   id: string;
   customerId: string;
   customer: Customer;
-  sacks: number; // Cantidad de sacos sueltos (15 kg)
-  totalWeightKg: number; // sacks * 15 kg
-  orderNotes?: string;
-  priority?: OrderPriority; // "Normal" | "Urgente"
-  concello?: string; // Concello extraído o asignado para filtrado rápido
-  cashToCollectEur?: number; // Importe previsto a cobrar en mano
-  cashCollectedEur?: number; // Importe real cobrado al entregar
-  dispatchedAt?: string; // Fecha ISO cuando pasa a "En Reparto"
-  deliveredAt?: string; // Fecha ISO cuando pasa a "Completado"
+  serviceType: ServiceType;
+  priority: OrderPriority;
+  equipmentInfo?: string; // Equipo o instalación específica del aviso
+  estimatedMinutes: number; // Duración estimada de intervención (min)
+  actualMinutes?: number; // Duración real reportada al cierre
+  estimatedPriceEur?: number; // Presupuesto o importe previsto a cobrar
+  collectedPriceEur?: number; // Importe real cobrado al finalizar
+  technicalNotes?: string; // Síntoma, material o repuestos necesarios
+  resolutionNote?: string; // Nota breve de cierre reportada por el técnico
+  concello?: string;
+  status: ServiceStatus;
+  dispatchedAt?: string;
+  completedAt?: string;
   createdAt: string;
-  status: OrderStatus;
 }
 
 /**
- * Configuración del furgón y punto de carga (Almacén).
+ * Configuración del Técnico / Vehículo Taller y Base Operativa.
  */
-export interface VanConfig {
-  vanCapacitySacks: number; // Ej. 90 sacos
-  maxWeightKg: number; // vanCapacitySacks * 15 kg
-  warehouseName: string;
+export interface TechnicianConfig {
+  maxWorkdayMinutes: number; // Ej. 480 min (8h)
+  maxStopsPerRoute: number; // Ej. 12 avisos/jornada
+  workdayStartTime: string; // "HH:mm", ej. "08:30"
+  warehouseName: string; // Base / Taller central
   warehouseVillage: string;
   warehouseCoordinates: Coordinates;
-  googleMapsApiKey?: string; // Clave opcional de Google Maps Places API
-  consumoVacioL100?: number; // Consumo del furgón vacío (ej. 8.5 L/100km)
-  extraConsumoPorTonelada?: number; // Litros extra cada 100km por cada 1.000 kg de carga (ej. +2.2 L/100km)
-  precioCombustible?: number; // Precio actual del diésel (ej. 1.55 €/L)
-  precioPorSaco?: number; // Precio de venta por saco para métricas de campaña (ej. 4.50 €)
+  googleMapsApiKey?: string;
+  consumoL100: number; // L/100km vehículo taller
+  precioCombustible: number; // €/L
+  hourlyCostEur?: number; // Coste interno por hora (opcional)
 }
 
 /**
- * Parada de un viaje optimizado.
- */
-export interface OptimizedStop {
-  order: PendingOrder;
-  sequenceOrder: number;
-  estimatedDrivingMinutesFromPrev?: number;
-}
-
-/**
- * Viaje optimizado con límite de capacidad de sacos.
- */
-export interface OptimizedTrip {
-  tripNumber: number;
-  orders: PendingOrder[];
-  stops: OptimizedStop[];
-  totalSacks: number;
-  totalWeightKg: number;
-  estimatedDrivingMinutes: number;
-  totalDistanceKm: number;
-  polyline: [number, number][]; // [lat, lng]
-}
-
-/**
- * Parada efímera transmitida a la terminal móvil del repartidor (/reparto).
- * Contiene únicamente los datos estrictamente necesarios y se destruye al entregar.
+ * Parada efímera transmitida a la terminal móvil del técnico (/tecnico y /reparto).
+ * Contiene únicamente los datos necesarios para la jornada y se destruye al cerrar cada parte.
  */
 export interface EphemeralStop {
   seq: number;
@@ -112,18 +91,49 @@ export interface EphemeralStop {
   village: string;
   lat: number;
   lng: number;
-  sacks: number;
-  totalWeightKg: number;
-  cashToCollectEur?: number; // Importe a cobrar en mano si aplica (c)
-  tags?: string; // Etiquetas/iconos operativos cortos de descarga (t)
-  phone?: string; // Teléfono opcional para botón tel: en cabina (ph)
+  serviceType: ServiceType;
+  priority: OrderPriority;
+  estimatedMinutes: number;
+  equipmentInfo?: string;
+  cashToCollectEur?: number; // Presupuesto o importe a cobrar (€)
+  tags?: string; // Material / notas técnicas / alertas cortas
+  phone?: string; // Teléfono opcional para botón tel: en campo
 }
 
 /**
- * Formato de serialización ultracompacto con claves de 1 letra para códigos QR y enlaces WhatsApp:
- * { i: idCorto, n: nombre, a: aldea, x: lat, y: lng, s: sacos, c: cobrarEnMano, t: tagsIconos, ph?: telefono }
+ * Formato de serialización ultracompacto v3 para QR y WhatsApp del técnico.
  */
-export interface UltraCompactStopWire {
+export interface UltraCompactStopWireV3 {
+  i: string; // shortId
+  n: string; // nombre cliente
+  a: string; // dirección / aldea
+  x: number; // lat (5 dec)
+  y: number; // lng (5 dec)
+  tp: "A" | "R" | "I"; // Avería | Revisión | Instalación
+  pr: 0 | 1; // 1 = Urgente, 0 = Normal
+  m: number; // estimatedMinutes
+  eq?: string; // equipmentInfo
+  c: number; // estimatedPriceEur
+  t: string; // technicalNotes / alertas
+  ph?: string; // teléfono
+}
+
+export interface UltraCompactTripWireV3 {
+  u: 3; // Versión ultracompacta v3 (SAT)
+  k: number; // tripNum
+  d: string; // date
+  w: {
+    n: string;
+    x: number;
+    y: number;
+  };
+  p: UltraCompactStopWireV3[];
+}
+
+/**
+ * Formato anterior v2 (compatibilidad hacia atrás con enlaces antiguos de pellets).
+ */
+export interface UltraCompactStopWireV2 {
   i: string;
   n: string;
   a: string;
@@ -135,23 +145,23 @@ export interface UltraCompactStopWire {
   ph?: string;
 }
 
-export interface UltraCompactTripWire {
-  u: 2; // Versión ultracompacta v2
-  k: number; // tripNum
-  d: string; // date
+export interface UltraCompactTripWireV2 {
+  u: 2;
+  k: number;
+  d: string;
   w: {
     n: string;
     x: number;
     y: number;
   };
-  p: UltraCompactStopWire[];
+  p: UltraCompactStopWireV2[];
 }
 
 /**
- * Payload completo comprimido en URL/QR para el repartidor.
+ * Payload completo comprimido en URL/QR para la terminal de técnico.
  */
 export interface EphemeralTripPayload {
-  v: "1.0";
+  v: "3.0" | "1.0";
   tripNum: number;
   date: string;
   warehouse: {
@@ -163,18 +173,20 @@ export interface EphemeralTripPayload {
 }
 
 /**
- * Payload ultracompacto de Retorno Zero-Cloud (/reparto -> /admin)
- * No contiene nombres, ni direcciones, ni coordenadas GPS. Solo IDs cortos y totales.
+ * Payload ultracompacto de Retorno Zero-Cloud v2 (SAT1-).
+ * No contiene nombres, ni direcciones, ni coordenadas GPS. Solo IDs cortos, minutos reales y cobro.
  */
-export interface UltraCompactReturnReceiptWire {
-  r: 1; // Versión 1 del recibo de retorno
+export interface UltraCompactReturnReceiptWireV2 {
+  r: 2; // Versión 2 (SAT)
   k: number; // tripNum
   d: string; // fecha YYYY-MM-DD
   t: string; // timestamp HH:mm de cierre
   e: {
-    i: string; // shortId de 6 caracteres del pedido
-    s: number; // sacos entregados
-    c: number; // efectivo cobrado en mano (€)
+    i: string; // shortId de 6 caracteres
+    tp: "A" | "R" | "I"; // tipo ejecutado
+    m: number; // actualMinutes empleados
+    c: number; // collectedPriceEur cobrados
+    nt?: string; // nota breve de resolución
   }[];
 }
 
@@ -184,9 +196,11 @@ export interface DecodedReturnReceipt {
   closedAtTime: string;
   deliveredItems: {
     shortId: string;
-    sacks: number;
+    serviceType: ServiceType;
+    actualMinutes: number;
     cashCollectedEur: number;
+    resolutionNote?: string;
   }[];
-  totalSacksDelivered: number;
+  totalMinutesWorked: number;
   totalCashCollectedEur: number;
 }

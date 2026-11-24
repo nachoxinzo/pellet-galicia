@@ -1,12 +1,56 @@
 import {
   Customer,
-  PendingOrder,
+  ServiceOrder,
+  ServiceType,
   OrderPriority,
   DecodedReturnReceipt,
-  VanConfig,
-  PELLET_GALICIA_RULES,
+  TechnicianConfig,
+  FIELD_SERVICE_RULES,
 } from "@/types/pelletGalicia";
-import { extractCashAndTagsFromNotes } from "@/utils/galiciaUrlCodec";
+import { extractTechTagsFromNotes } from "@/utils/galiciaUrlCodec";
+
+const STORAGE_KEYS = {
+  CUSTOMERS: "fieldops_customers_v3",
+  ORDERS: "fieldops_orders_v3",
+  CONFIG: "fieldops_config_v3",
+  INITIALIZED: "fieldops_initialized_v3",
+  LAST_BACKUP_AT: "fieldops_last_backup_at_v3",
+  ORDERS_SINCE_BACKUP: "fieldops_orders_since_backup_v3",
+} as const;
+
+export interface BackupAlertStatus {
+  lastBackupAt: string | null;
+  daysSinceBackup: number | null;
+  ordersSinceBackup: number;
+  needsBackupAlert: boolean;
+}
+
+export const DEFAULT_TECH_CONFIG: TechnicianConfig = {
+  maxWorkdayMinutes: FIELD_SERVICE_RULES.DEFAULT_MAX_WORKDAY_MINUTES,
+  maxStopsPerRoute: FIELD_SERVICE_RULES.DEFAULT_MAX_STOPS_PER_ROUTE,
+  workdayStartTime: FIELD_SERVICE_RULES.DEFAULT_START_TIME,
+  warehouseName: "Base / Taller Central",
+  warehouseVillage: "Polígono San Cibrao das Viñas, Parcela 14, Ourense",
+  warehouseCoordinates: { lat: 42.2982, lng: -7.8185 },
+  consumoL100: FIELD_SERVICE_RULES.DEFAULT_CONSUMO_L100,
+  precioCombustible: FIELD_SERVICE_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
+  hourlyCostEur: FIELD_SERVICE_RULES.DEFAULT_HOURLY_COST_EUR,
+};
+
+export function normalizeGaliciaText(str?: string): string {
+  if (!str) return "";
+  return str
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function normalizePhoneDigits(phone?: string): string {
+  if (!phone) return "";
+  return phone.replace(/\D/g, "");
+}
 
 export function extractConcelloFromVillage(village?: string): string {
   if (!village) return "Otros";
@@ -30,79 +74,87 @@ export function extractConcelloFromVillage(village?: string): string {
   return parts[parts.length - 1] || parts[0] || "General";
 }
 
-const STORAGE_KEYS = {
-  CUSTOMERS: "pelletgalicia_customers_v2",
-  ORDERS: "pelletgalicia_orders_v2",
-  CONFIG: "pelletgalicia_vanconfig_v2",
-  INITIALIZED: "pelletgalicia_empty_clean_v2",
-  LAST_BACKUP_AT: "pelletgalicia_last_backup_at_v2",
-  ORDERS_SINCE_BACKUP: "pelletgalicia_orders_since_backup_v2",
-} as const;
-
-export interface BackupAlertStatus {
-  lastBackupAt: string | null;
-  daysSinceBackup: number | null;
-  ordersSinceBackup: number;
-  needsBackupAlert: boolean;
-}
-
-export const DEFAULT_GALICIA_VAN_CONFIG: VanConfig = {
-  vanCapacitySacks: PELLET_GALICIA_RULES.DEFAULT_VAN_CAPACITY_SACKS,
-  maxWeightKg:
-    PELLET_GALICIA_RULES.DEFAULT_VAN_CAPACITY_SACKS *
-    PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
-  warehouseName: "Base Central PelletGalicia",
-  warehouseVillage: "Polígono San Cibrao das Viñas, Parcela 14, Ourense",
-  warehouseCoordinates: { lat: 42.2982, lng: -7.8185 },
-  consumoVacioL100: PELLET_GALICIA_RULES.DEFAULT_CONSUMO_VACIO_L100,
-  extraConsumoPorTonelada: PELLET_GALICIA_RULES.DEFAULT_EXTRA_CONSUMO_TONELADA,
-  precioCombustible: PELLET_GALICIA_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
-  precioPorSaco: PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO,
-};
-
-export function normalizeGaliciaText(str?: string): string {
-  if (!str) return "";
-  return str
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
-export function normalizePhoneDigits(phone?: string): string {
-  if (!phone) return "";
-  return phone.replace(/\D/g, "");
-}
-
-class LocalGaliciaStorageService {
+class LocalFieldServiceStorage {
   private isBrowser(): boolean {
     return typeof window !== "undefined";
   }
 
+  /**
+   * Inicializa v3 y migra automáticamente la cartera de clientes y coordenadas
+   * desde la v2 anterior si existieran, sin perder la geolocalización satelital.
+   */
   private ensureSeeded(): void {
     if (!this.isBrowser()) return;
 
-    // Purgar claves antiguas de prueba v1 si estuvieran guardadas en el navegador
-    if (localStorage.getItem("pelletgalicia_seeded_v1")) {
-      try {
-        localStorage.removeItem("pelletgalicia_customers_v1");
-        localStorage.removeItem("pelletgalicia_orders_v1");
-        localStorage.removeItem("pelletgalicia_seeded_v1");
-      } catch (e) {
-        console.warn("Error limpiando v1:", e);
-      }
-    }
-
     const seeded = localStorage.getItem(STORAGE_KEYS.INITIALIZED);
     if (!seeded) {
-      // BASE DE DATOS TOTALMENTE VACÍA
-      localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify([]));
-      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify([]));
+      let migratedCustomers: Customer[] = [];
+      let migratedConfig: TechnicianConfig = { ...DEFAULT_TECH_CONFIG };
+
+      try {
+        const rawV2Cust = localStorage.getItem("pelletgalicia_customers_v2");
+        if (rawV2Cust) {
+          const parsedV2 = JSON.parse(rawV2Cust);
+          if (Array.isArray(parsedV2)) {
+            migratedCustomers = parsedV2
+              .filter(
+                (c: any) =>
+                  c &&
+                  typeof c.name === "string" &&
+                  Number.isFinite(Number(c.coordinates?.lat)) &&
+                  Number.isFinite(Number(c.coordinates?.lng))
+              )
+              .map((c: any) => ({
+                id: String(c.id),
+                name: c.name,
+                village: String(c.village || ""),
+                phone: String(c.phone || ""),
+                coordinates: {
+                  lat: Number(c.coordinates.lat),
+                  lng: Number(c.coordinates.lng),
+                },
+                equipmentInfo: c.equipmentInfo || "",
+                internalNotes: String(c.internalNotes || ""),
+                lastServiceType: "Revisión" as ServiceType,
+                lastInterventionMinutes:
+                  FIELD_SERVICE_RULES.DEFAULT_INTERVENTION_MINUTES,
+                lastServiceDate: c.fechaUltimoPedido || c.updatedAt,
+                totalServicesHistory: Number(c.totalPedidosHistorico || 0),
+                totalBilledHistoryEur: 0,
+                createdAt: c.createdAt || new Date().toISOString(),
+                updatedAt: c.updatedAt || new Date().toISOString(),
+              }));
+          }
+        }
+
+        const rawV2Cfg = localStorage.getItem("pelletgalicia_vanconfig_v2");
+        if (rawV2Cfg) {
+          const cfg = JSON.parse(rawV2Cfg);
+          if (cfg && typeof cfg === "object") {
+            migratedConfig = {
+              ...DEFAULT_TECH_CONFIG,
+              warehouseName: cfg.warehouseName || DEFAULT_TECH_CONFIG.warehouseName,
+              warehouseVillage:
+                cfg.warehouseVillage || DEFAULT_TECH_CONFIG.warehouseVillage,
+              warehouseCoordinates:
+                cfg.warehouseCoordinates || DEFAULT_TECH_CONFIG.warehouseCoordinates,
+              googleMapsApiKey: cfg.googleMapsApiKey,
+              precioCombustible:
+                Number(cfg.precioCombustible) ||
+                DEFAULT_TECH_CONFIG.precioCombustible,
+            };
+          }
+        }
+      } catch (err) {
+        console.warn("Aviso migrando cartera v2 -> v3:", err);
+      }
+
       localStorage.setItem(
-        STORAGE_KEYS.CONFIG,
-        JSON.stringify(DEFAULT_GALICIA_VAN_CONFIG)
+        STORAGE_KEYS.CUSTOMERS,
+        JSON.stringify(migratedCustomers)
       );
+      localStorage.setItem(STORAGE_KEYS.ORDERS, JSON.stringify([]));
+      localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(migratedConfig));
       localStorage.setItem(STORAGE_KEYS.INITIALIZED, "true");
     }
   }
@@ -123,67 +175,11 @@ class LocalGaliciaStorageService {
     localStorage.setItem(key, JSON.stringify(data));
   }
 
-  // --- CLIENTES ---
+  // --- CLIENTES / INSTALACIONES ---
   getCustomers(): Customer[] {
-    const rawCustomers = this.read<Customer[]>(STORAGE_KEYS.CUSTOMERS, []);
-    const allOrders = this.read<PendingOrder[]>(STORAGE_KEYS.ORDERS, []);
-    let needsWrite = false;
-
-    const enriched = rawCustomers.map((c) => {
-      if (
-        c.ultimosSacos !== undefined &&
-        c.totalPedidosHistorico !== undefined
-      ) {
-        return c;
-      }
-
-      const custOrders = allOrders
-        .filter(
-          (o) =>
-            o.customerId === c.id ||
-            normalizeGaliciaText(o.customer?.name) ===
-              normalizeGaliciaText(c.name)
-        )
-        .sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
-
-      if (custOrders.length > 0) {
-        needsWrite = true;
-        const latest = custOrders[0];
-        return {
-          ...c,
-          ultimosSacos: c.ultimosSacos ?? latest.sacks,
-          fechaUltimoPedido: c.fechaUltimoPedido ?? latest.createdAt,
-          totalPedidosHistorico: c.totalPedidosHistorico ?? custOrders.length,
-          totalSacosHistorico:
-            c.totalSacosHistorico ??
-            custOrders.reduce((sum, o) => sum + o.sacks, 0),
-          internalNotes: c.internalNotes || latest.orderNotes || "",
-        };
-      }
-
-      return {
-        ...c,
-        ultimosSacos: c.ultimosSacos ?? 30,
-        fechaUltimoPedido: c.fechaUltimoPedido ?? c.updatedAt,
-        totalPedidosHistorico: c.totalPedidosHistorico ?? 0,
-        totalSacosHistorico: c.totalSacosHistorico ?? 0,
-      };
-    });
-
-    if (needsWrite) {
-      this.write(STORAGE_KEYS.CUSTOMERS, enriched);
-    }
-
-    return enriched;
+    return this.read<Customer[]>(STORAGE_KEYS.CUSTOMERS, []);
   }
 
-  /**
-   * Busca si ya existe un cliente por ID, nombre normalizado (sin tildes/mayúsculas)
-   * o teléfono normalizado (mínimo 6 dígitos) para evitar duplicados.
-   */
   findMatchingCustomer(
     name: string,
     phone?: string,
@@ -222,7 +218,6 @@ class LocalGaliciaStorageService {
     const list = this.getCustomers();
     const now = new Date().toISOString();
 
-    // Prevención inteligente de duplicados por ID, nombre normalizado o teléfono
     const existing = this.findMatchingCustomer(
       customerData.name,
       customerData.phone,
@@ -238,27 +233,36 @@ class LocalGaliciaStorageService {
       village: customerData.village.trim(),
       phone: customerData.phone?.trim() || existing?.phone || "",
       coordinates: customerData.coordinates,
+      equipmentInfo:
+        customerData.equipmentInfo?.trim() !== undefined &&
+        customerData.equipmentInfo.trim() !== ""
+          ? customerData.equipmentInfo.trim()
+          : existing?.equipmentInfo || "",
       internalNotes:
         customerData.internalNotes?.trim() !== undefined &&
         customerData.internalNotes.trim() !== ""
           ? customerData.internalNotes.trim()
           : existing?.internalNotes || "",
-      ultimosSacos: customerData.ultimosSacos ?? existing?.ultimosSacos ?? 30,
-      fechaUltimoPedido:
-        customerData.fechaUltimoPedido ?? existing?.fechaUltimoPedido ?? now,
-      totalPedidosHistorico:
-        customerData.totalPedidosHistorico ??
-        existing?.totalPedidosHistorico ??
+      lastServiceType:
+        customerData.lastServiceType ?? existing?.lastServiceType ?? "Revisión",
+      lastInterventionMinutes:
+        customerData.lastInterventionMinutes ??
+        existing?.lastInterventionMinutes ??
+        FIELD_SERVICE_RULES.DEFAULT_INTERVENTION_MINUTES,
+      lastServiceDate:
+        customerData.lastServiceDate ?? existing?.lastServiceDate ?? now,
+      totalServicesHistory:
+        customerData.totalServicesHistory ?? existing?.totalServicesHistory ?? 0,
+      totalBilledHistoryEur:
+        customerData.totalBilledHistoryEur ??
+        existing?.totalBilledHistoryEur ??
         0,
-      totalSacosHistorico:
-        customerData.totalSacosHistorico ?? existing?.totalSacosHistorico ?? 0,
       createdAt: existing ? existing.createdAt : now,
       updatedAt: now,
     };
 
     if (idx >= 0) {
       list[idx] = customer;
-      // Sincronizar snapshot en los pedidos existentes del cliente
       const orders = this.getOrders().map((o) =>
         o.customerId === id ? { ...o, customer } : o
       );
@@ -275,46 +279,71 @@ class LocalGaliciaStorageService {
     const list = this.getCustomers().filter((c) => c.id !== id);
     this.write(STORAGE_KEYS.CUSTOMERS, list);
 
-    // Eliminar también cualquier pedido asociado
     const orders = this.getOrders().filter((o) => o.customerId !== id);
     this.write(STORAGE_KEYS.ORDERS, orders);
   }
 
-  // --- PEDIDOS ---
-  getOrders(): PendingOrder[] {
-    return this.read<PendingOrder[]>(STORAGE_KEYS.ORDERS, []);
+  // --- PARTES / AVISOS DE SERVICIO ---
+  getOrders(): ServiceOrder[] {
+    return this.read<ServiceOrder[]>(STORAGE_KEYS.ORDERS, []);
   }
 
-  getPendingOrders(): PendingOrder[] {
-    return this.getOrders().filter((o) => o.status === "Pendiente");
+  getPendingOrders(): ServiceOrder[] {
+    return this.getOrders().filter(
+      (o) => o.status === "Pendiente" || o.status === "En Ruta"
+    );
   }
 
   saveOrder(
     customerId: string,
-    sacks: number,
-    orderNotes?: string,
-    priority: OrderPriority = "Normal"
-  ): PendingOrder {
+    payload: {
+      serviceType?: ServiceType;
+      priority?: OrderPriority;
+      equipmentInfo?: string;
+      estimatedMinutes?: number;
+      estimatedPriceEur?: number;
+      technicalNotes?: string;
+    }
+  ): ServiceOrder {
     const customers = this.getCustomers();
     const custIdx = customers.findIndex((c) => c.id === customerId);
     if (custIdx === -1) throw new Error("Cliente no encontrado");
 
     const now = new Date().toISOString();
     const existingCust = customers[custIdx];
+
+    const serviceType: ServiceType = payload.serviceType ?? "Avería";
+    const priority: OrderPriority = payload.priority ?? "Normal";
+    const estimatedMinutes = Math.max(
+      15,
+      Math.min(
+        480,
+        Math.round(
+          payload.estimatedMinutes ||
+            FIELD_SERVICE_RULES.DEFAULT_INTERVENTION_MINUTES
+        )
+      )
+    );
     const resolvedNotes =
-      orderNotes?.trim() !== undefined && orderNotes.trim() !== ""
-        ? orderNotes.trim()
+      payload.technicalNotes?.trim() !== undefined &&
+      payload.technicalNotes.trim() !== ""
+        ? payload.technicalNotes.trim()
         : existingCust.internalNotes || "";
+    const resolvedEquipment =
+      payload.equipmentInfo?.trim() || existingCust.equipmentInfo || "";
 
-    const { cashToCollectEur } = extractCashAndTagsFromNotes(resolvedNotes);
+    const { cashToCollectEur } = extractTechTagsFromNotes(
+      resolvedNotes,
+      payload.estimatedPriceEur
+    );
 
-    // Actualizar estadísticas históricas de la ficha del cliente
     const updatedCustomer: Customer = {
       ...existingCust,
-      ultimosSacos: sacks,
-      fechaUltimoPedido: now,
-      totalPedidosHistorico: (existingCust.totalPedidosHistorico || 0) + 1,
-      totalSacosHistorico: (existingCust.totalSacosHistorico || 0) + sacks,
+      equipmentInfo: resolvedEquipment,
+      lastServiceType: serviceType,
+      lastInterventionMinutes: estimatedMinutes,
+      lastServiceDate: now,
+      totalServicesHistory: (existingCust.totalServicesHistory || 0) + 1,
       internalNotes: resolvedNotes,
       updatedAt: now,
     };
@@ -326,24 +355,24 @@ class LocalGaliciaStorageService {
       o.customerId === customerId ? { ...o, customer: updatedCustomer } : o
     );
 
-    const order: PendingOrder = {
-      id: `ord-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    const order: ServiceOrder = {
+      id: `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       customerId,
       customer: updatedCustomer,
-      sacks,
-      totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
-      orderNotes: resolvedNotes,
+      serviceType,
       priority,
+      equipmentInfo: resolvedEquipment,
+      estimatedMinutes,
+      estimatedPriceEur: cashToCollectEur > 0 ? cashToCollectEur : 0,
+      technicalNotes: resolvedNotes,
       concello: extractConcelloFromVillage(updatedCustomer.village),
-      cashToCollectEur: cashToCollectEur > 0 ? cashToCollectEur : undefined,
-      createdAt: now,
       status: "Pendiente",
+      createdAt: now,
     };
 
     orders.unshift(order);
     this.write(STORAGE_KEYS.ORDERS, orders);
 
-    // Incrementar contador de pedidos nuevos desde el último backup
     const currentSinceBackup = this.read<number>(
       STORAGE_KEYS.ORDERS_SINCE_BACKUP,
       0
@@ -356,27 +385,41 @@ class LocalGaliciaStorageService {
   updateOrder(
     id: string,
     updates: {
-      sacks?: number;
-      orderNotes?: string;
+      serviceType?: ServiceType;
       priority?: OrderPriority;
-      status?: PendingOrder["status"];
+      equipmentInfo?: string;
+      estimatedMinutes?: number;
+      estimatedPriceEur?: number;
+      technicalNotes?: string;
+      status?: ServiceOrder["status"];
     }
-  ): PendingOrder | null {
+  ): ServiceOrder | null {
     const orders = this.getOrders();
     const idx = orders.findIndex((o) => o.id === id);
     if (idx === -1) return null;
 
     const current = orders[idx];
-    const sacks =
-      updates.sacks !== undefined ? Math.max(1, updates.sacks) : current.sacks;
-    const sacksDiff = sacks - current.sacks;
+    const estimatedMinutes =
+      updates.estimatedMinutes !== undefined
+        ? Math.max(15, Math.min(480, Math.round(updates.estimatedMinutes)))
+        : current.estimatedMinutes;
     const updatedNotes =
-      updates.orderNotes !== undefined
-        ? updates.orderNotes.trim()
-        : current.orderNotes;
-    const { cashToCollectEur } = extractCashAndTagsFromNotes(updatedNotes);
+      updates.technicalNotes !== undefined
+        ? updates.technicalNotes.trim()
+        : current.technicalNotes;
+    const updatedEquipment =
+      updates.equipmentInfo !== undefined
+        ? updates.equipmentInfo.trim()
+        : current.equipmentInfo;
+    const explicitPrice =
+      updates.estimatedPriceEur !== undefined
+        ? updates.estimatedPriceEur
+        : current.estimatedPriceEur;
+    const { cashToCollectEur } = extractTechTagsFromNotes(
+      updatedNotes,
+      explicitPrice
+    );
 
-    // Sincronizar ficha del cliente habitual
     const customers = this.getCustomers();
     const custIdx = customers.findIndex((c) => c.id === current.customerId);
     let updatedCustomer = current.customer;
@@ -385,11 +428,9 @@ class LocalGaliciaStorageService {
       const c = customers[custIdx];
       updatedCustomer = {
         ...c,
-        ultimosSacos: sacks,
-        totalSacosHistorico: Math.max(
-          sacks,
-          (c.totalSacosHistorico || current.sacks) + sacksDiff
-        ),
+        equipmentInfo: updatedEquipment || c.equipmentInfo || "",
+        lastServiceType: updates.serviceType ?? current.serviceType,
+        lastInterventionMinutes: estimatedMinutes,
         internalNotes: updatedNotes || c.internalNotes || "",
         updatedAt: new Date().toISOString(),
       };
@@ -397,15 +438,21 @@ class LocalGaliciaStorageService {
       this.write(STORAGE_KEYS.CUSTOMERS, customers);
     }
 
-    const updated: PendingOrder = {
+    const updated: ServiceOrder = {
       ...current,
       customer: updatedCustomer,
-      sacks,
-      totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
-      orderNotes: updatedNotes,
-      priority: updates.priority ?? current.priority ?? "Normal",
+      serviceType: updates.serviceType ?? current.serviceType,
+      priority: updates.priority ?? current.priority,
+      equipmentInfo: updatedEquipment,
+      estimatedMinutes,
+      estimatedPriceEur:
+        updates.estimatedPriceEur !== undefined
+          ? Math.max(0, updates.estimatedPriceEur)
+          : cashToCollectEur > 0
+          ? cashToCollectEur
+          : current.estimatedPriceEur,
+      technicalNotes: updatedNotes,
       concello: extractConcelloFromVillage(updatedCustomer.village),
-      cashToCollectEur: cashToCollectEur > 0 ? cashToCollectEur : undefined,
       status: updates.status ?? current.status,
     };
 
@@ -414,45 +461,23 @@ class LocalGaliciaStorageService {
     return updated;
   }
 
-  updateOrderSacks(
+  updateOrderDuration(
     id: string,
     deltaOrExact: number,
     isDelta = false
-  ): PendingOrder | null {
+  ): ServiceOrder | null {
     const orders = this.getOrders();
     const idx = orders.findIndex((o) => o.id === id);
     if (idx === -1) return null;
 
     const current = orders[idx];
-    const sacks = isDelta
-      ? Math.max(1, current.sacks + deltaOrExact)
-      : Math.max(1, deltaOrExact);
-    const sacksDiff = sacks - current.sacks;
+    const estimatedMinutes = isDelta
+      ? Math.max(15, Math.min(480, current.estimatedMinutes + deltaOrExact))
+      : Math.max(15, Math.min(480, deltaOrExact));
 
-    const customers = this.getCustomers();
-    const custIdx = customers.findIndex((c) => c.id === current.customerId);
-    let updatedCustomer = current.customer;
-
-    if (custIdx >= 0) {
-      const c = customers[custIdx];
-      updatedCustomer = {
-        ...c,
-        ultimosSacos: sacks,
-        totalSacosHistorico: Math.max(
-          sacks,
-          (c.totalSacosHistorico || current.sacks) + sacksDiff
-        ),
-        updatedAt: new Date().toISOString(),
-      };
-      customers[custIdx] = updatedCustomer;
-      this.write(STORAGE_KEYS.CUSTOMERS, customers);
-    }
-
-    const updated: PendingOrder = {
+    const updated: ServiceOrder = {
       ...current,
-      customer: updatedCustomer,
-      sacks,
-      totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+      estimatedMinutes,
     };
 
     orders[idx] = updated;
@@ -465,30 +490,43 @@ class LocalGaliciaStorageService {
     this.write(STORAGE_KEYS.ORDERS, orders);
   }
 
-  updateOrderStatus(id: string, status: PendingOrder["status"]): void {
+  updateOrderStatus(id: string, status: ServiceOrder["status"]): void {
+    const now = new Date().toISOString();
     const allOrders = this.getOrders();
     const target = allOrders.find((o) => o.id === id);
+
     if (target && status === "Completado") {
       const customers = this.getCustomers();
       const custIdx = customers.findIndex((c) => c.id === target.customerId);
       if (custIdx >= 0) {
+        const billed =
+          target.collectedPriceEur ?? target.estimatedPriceEur ?? 0;
         customers[custIdx] = {
           ...customers[custIdx],
-          ultimosSacos: target.sacks,
-          fechaUltimoPedido: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          lastServiceType: target.serviceType,
+          lastInterventionMinutes: target.actualMinutes ?? target.estimatedMinutes,
+          lastServiceDate: now,
+          totalBilledHistoryEur:
+            (customers[custIdx].totalBilledHistoryEur || 0) + billed,
+          updatedAt: now,
         };
         this.write(STORAGE_KEYS.CUSTOMERS, customers);
       }
     }
 
     const orders = allOrders.map((o) =>
-      o.id === id ? { ...o, status } : o
+      o.id === id
+        ? {
+            ...o,
+            status,
+            ...(status === "Completado" ? { completedAt: now } : {}),
+          }
+        : o
     );
     this.write(STORAGE_KEYS.ORDERS, orders);
   }
 
-  markOrdersDelivered(orderIds: string[]): void {
+  markOrdersCompleted(orderIds: string[]): void {
     const allOrders = this.getOrders();
     const customers = this.getCustomers();
     const now = new Date().toISOString();
@@ -498,10 +536,14 @@ class LocalGaliciaStorageService {
       if (orderIds.includes(o.id)) {
         const custIdx = customers.findIndex((c) => c.id === o.customerId);
         if (custIdx >= 0) {
+          const billed = o.collectedPriceEur ?? o.estimatedPriceEur ?? 0;
           customers[custIdx] = {
             ...customers[custIdx],
-            ultimosSacos: o.sacks,
-            fechaUltimoPedido: now,
+            lastServiceType: o.serviceType,
+            lastInterventionMinutes: o.actualMinutes ?? o.estimatedMinutes,
+            lastServiceDate: now,
+            totalBilledHistoryEur:
+              (customers[custIdx].totalBilledHistoryEur || 0) + billed,
             updatedAt: now,
           };
           customersUpdated = true;
@@ -514,34 +556,30 @@ class LocalGaliciaStorageService {
     }
 
     const orders = allOrders.map((o) =>
-      orderIds.includes(o.id) ? { ...o, status: "Completado" as const } : o
+      orderIds.includes(o.id)
+        ? { ...o, status: "Completado" as const, completedAt: now }
+        : o
     );
     this.write(STORAGE_KEYS.ORDERS, orders);
   }
 
-  markOrdersAsDelivered(orderIds: string[]): void {
-    this.markOrdersDelivered(orderIds);
-  }
-
-  /**
-   * Marca un conjunto de pedidos como "En Reparto" al despachar el viaje al chofer.
-   */
-  markOrdersInDelivery(orderIds: string[]): void {
+  markOrdersInRoute(orderIds: string[]): void {
     const now = new Date().toISOString();
     const orders = this.getOrders().map((o) =>
       orderIds.includes(o.id)
-        ? { ...o, status: "En Reparto" as const, dispatchedAt: now }
+        ? { ...o, status: "En Ruta" as const, dispatchedAt: now }
         : o
     );
     this.write(STORAGE_KEYS.ORDERS, orders);
   }
 
   /**
-   * Concilia un recibo de cierre Zero-Cloud (/reparto -> /admin) cruzando los IDs cortos de 6 caracteres.
+   * Concilia un recibo de cierre Zero-Cloud (/tecnico -> /admin)
+   * actualizando estado a Completado, minutos reales, importe cobrado y nota de resolución.
    */
   reconcileReturnReceipt(receipt: DecodedReturnReceipt): {
     matchedOrderIds: string[];
-    totalSacksUpdated: number;
+    totalMinutesRecorded: number;
     totalCashRecordedEur: number;
   } {
     const allOrders = this.getOrders();
@@ -549,12 +587,12 @@ class LocalGaliciaStorageService {
     const now = new Date().toISOString();
 
     const matchedOrderIds: string[] = [];
-    let totalSacksUpdated = 0;
+    let totalMinutesRecorded = 0;
     let totalCashRecordedEur = 0;
     let customersChanged = false;
 
     const updatedOrders = allOrders.map((ord) => {
-      const ordShortId = ord.id.replace(/^(eph-|ord-)/g, "").slice(-6);
+      const ordShortId = ord.id.replace(/^(eph-|ord-|srv-)/g, "").slice(-6);
       const item = receipt.deliveredItems.find(
         (it) =>
           it.shortId === ordShortId ||
@@ -565,15 +603,19 @@ class LocalGaliciaStorageService {
       if (!item) return ord;
 
       matchedOrderIds.push(ord.id);
-      totalSacksUpdated += item.sacks;
+      totalMinutesRecorded += item.actualMinutes;
       totalCashRecordedEur += item.cashCollectedEur;
 
       const custIdx = customers.findIndex((c) => c.id === ord.customerId);
       if (custIdx >= 0) {
         customers[custIdx] = {
           ...customers[custIdx],
-          ultimosSacos: item.sacks,
-          fechaUltimoPedido: now,
+          lastServiceType: item.serviceType,
+          lastInterventionMinutes: item.actualMinutes,
+          lastServiceDate: now,
+          totalBilledHistoryEur:
+            (customers[custIdx].totalBilledHistoryEur || 0) +
+            item.cashCollectedEur,
           updatedAt: now,
         };
         customersChanged = true;
@@ -581,11 +623,12 @@ class LocalGaliciaStorageService {
 
       return {
         ...ord,
-        sacks: item.sacks,
-        totalWeightKg: item.sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+        serviceType: item.serviceType,
+        actualMinutes: item.actualMinutes,
+        collectedPriceEur: item.cashCollectedEur,
+        resolutionNote: item.resolutionNote || ord.resolutionNote,
         status: "Completado" as const,
-        deliveredAt: now,
-        cashCollectedEur: item.cashCollectedEur,
+        completedAt: now,
       };
     });
 
@@ -598,47 +641,56 @@ class LocalGaliciaStorageService {
 
     return {
       matchedOrderIds,
-      totalSacksUpdated,
+      totalMinutesRecorded,
       totalCashRecordedEur: Number(totalCashRecordedEur.toFixed(2)),
     };
   }
 
   // --- CONFIGURACIÓN ---
-  getConfig(): VanConfig {
-    const raw = this.read<VanConfig>(
+  getConfig(): TechnicianConfig {
+    const raw = this.read<TechnicianConfig>(
       STORAGE_KEYS.CONFIG,
-      DEFAULT_GALICIA_VAN_CONFIG
+      DEFAULT_TECH_CONFIG
     );
     return {
-      ...DEFAULT_GALICIA_VAN_CONFIG,
+      ...DEFAULT_TECH_CONFIG,
       ...raw,
-      consumoVacioL100:
-        raw.consumoVacioL100 ?? PELLET_GALICIA_RULES.DEFAULT_CONSUMO_VACIO_L100,
-      extraConsumoPorTonelada:
-        raw.extraConsumoPorTonelada ??
-        PELLET_GALICIA_RULES.DEFAULT_EXTRA_CONSUMO_TONELADA,
+      maxWorkdayMinutes:
+        raw.maxWorkdayMinutes ?? FIELD_SERVICE_RULES.DEFAULT_MAX_WORKDAY_MINUTES,
+      maxStopsPerRoute:
+        raw.maxStopsPerRoute ?? FIELD_SERVICE_RULES.DEFAULT_MAX_STOPS_PER_ROUTE,
+      workdayStartTime:
+        raw.workdayStartTime || FIELD_SERVICE_RULES.DEFAULT_START_TIME,
+      consumoL100: raw.consumoL100 ?? FIELD_SERVICE_RULES.DEFAULT_CONSUMO_L100,
       precioCombustible:
-        raw.precioCombustible ??
-        PELLET_GALICIA_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
-      precioPorSaco:
-        raw.precioPorSaco ?? PELLET_GALICIA_RULES.DEFAULT_PRECIO_POR_SACO,
+        raw.precioCombustible ?? FIELD_SERVICE_RULES.DEFAULT_PRECIO_COMBUSTIBLE,
+      hourlyCostEur:
+        raw.hourlyCostEur ?? FIELD_SERVICE_RULES.DEFAULT_HOURLY_COST_EUR,
     };
   }
 
-  saveConfig(partial: Partial<VanConfig>): VanConfig {
+  saveConfig(partial: Partial<TechnicianConfig>): TechnicianConfig {
     const current = this.getConfig();
-    const capacity = partial.vanCapacitySacks ?? current.vanCapacitySacks;
-    const updated: VanConfig = {
+    const updated: TechnicianConfig = {
       ...current,
       ...partial,
-      vanCapacitySacks: capacity,
-      maxWeightKg: capacity * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+      maxWorkdayMinutes: Math.max(
+        60,
+        Math.min(
+          960,
+          Number(partial.maxWorkdayMinutes ?? current.maxWorkdayMinutes)
+        )
+      ),
+      maxStopsPerRoute: Math.max(
+        1,
+        Math.min(30, Number(partial.maxStopsPerRoute ?? current.maxStopsPerRoute))
+      ),
     };
     this.write(STORAGE_KEYS.CONFIG, updated);
     return updated;
   }
 
-  // --- BACKUP SEGURO JSON & ALERTAS DE SEGURIDAD ---
+  // --- BACKUP SEGURO JSON & ALERTAS ---
   getBackupAlertStatus(): BackupAlertStatus {
     if (!this.isBrowser()) {
       return {
@@ -664,7 +716,6 @@ class LocalGaliciaStorageService {
       }
     }
 
-    // Alerta si han pasado > 7 días o se han añadido > 10 pedidos nuevos sin exportar
     const needsBackupAlert =
       ordersSinceBackup > 10 ||
       (daysSinceBackup !== null && daysSinceBackup > 7 && totalOrders > 0) ||
@@ -690,8 +741,8 @@ class LocalGaliciaStorageService {
     }
 
     const payload = {
-      app: "PelletGalicia",
-      version: "2.0",
+      app: "SATRuta",
+      version: "3.0",
       exportedAt: nowIso,
       data: {
         customers,
@@ -706,7 +757,9 @@ class LocalGaliciaStorageService {
   importBackupJson(jsonString: string): boolean {
     try {
       if (!jsonString || jsonString.length > 10 * 1024 * 1024) {
-        throw new Error("El archivo de backup supera el tamaño máximo permitido (10 MB).");
+        throw new Error(
+          "El archivo de backup supera el tamaño máximo permitido (10 MB)."
+        );
       }
 
       const parsed = JSON.parse(jsonString);
@@ -739,19 +792,29 @@ class LocalGaliciaStorageService {
               village: String(c.village || "").trim().slice(0, 240),
               phone: String(c.phone || "").trim().slice(0, 40),
               coordinates: { lat, lng },
+              equipmentInfo: String(c.equipmentInfo || "").trim().slice(0, 160),
               internalNotes: String(c.internalNotes || "").trim().slice(0, 500),
-              ultimosSacos: Math.max(
-                1,
-                Math.min(500, Math.floor(Number(c.ultimosSacos) || 30))
+              lastServiceType:
+                c.lastServiceType === "Avería" ||
+                c.lastServiceType === "Instalación"
+                  ? c.lastServiceType
+                  : "Revisión",
+              lastInterventionMinutes: Math.max(
+                15,
+                Math.min(480, Number(c.lastInterventionMinutes) || 45)
               ),
-              fechaUltimoPedido: String(c.fechaUltimoPedido || now),
-              totalPedidosHistorico: Math.max(
-                0,
-                Math.floor(Number(c.totalPedidosHistorico) || 0)
+              lastServiceDate: String(
+                c.lastServiceDate || c.fechaUltimoPedido || now
               ),
-              totalSacosHistorico: Math.max(
+              totalServicesHistory: Math.max(
                 0,
-                Math.floor(Number(c.totalSacosHistorico) || 0)
+                Math.floor(
+                  Number(c.totalServicesHistory ?? c.totalPedidosHistorico) || 0
+                )
+              ),
+              totalBilledHistoryEur: Math.max(
+                0,
+                Number(c.totalBilledHistoryEur) || 0
               ),
               createdAt: String(c.createdAt || now),
               updatedAt: String(c.updatedAt || now),
@@ -763,9 +826,15 @@ class LocalGaliciaStorageService {
       }
 
       if (Array.isArray(parsed.data.orders)) {
-        const sanitizedOrders: PendingOrder[] = parsed.data.orders
+        const validStatuses: ServiceOrder["status"][] = [
+          "Pendiente",
+          "En Ruta",
+          "Completado",
+          "Cancelado",
+        ];
+        const sanitizedOrders: ServiceOrder[] = parsed.data.orders
           .slice(0, 10000)
-          .map((o: any, idx: number): PendingOrder | null => {
+          .map((o: any, idx: number): ServiceOrder | null => {
             if (!o || typeof o !== "object" || !o.customer) return null;
             const lat = Number(o.customer?.coordinates?.lat);
             const lng = Number(o.customer?.coordinates?.lng);
@@ -777,25 +846,20 @@ class LocalGaliciaStorageService {
             ) {
               return null;
             }
-            const sacks = Math.max(
-              1,
-              Math.min(500, Math.floor(Number(o.sacks) || 1))
-            );
-            const validStatuses: PendingOrder["status"][] = [
-              "Pendiente",
-              "En Reparto",
-              "Completado",
-              "Cancelado",
-            ];
-            const status: PendingOrder["status"] =
-              o.status === "En Ruta"
-                ? "En Reparto"
+            const status: ServiceOrder["status"] =
+              o.status === "En Reparto"
+                ? "En Ruta"
                 : validStatuses.includes(o.status)
                 ? o.status
                 : "Pendiente";
 
+            const serviceType: ServiceType =
+              o.serviceType === "Avería" || o.serviceType === "Instalación"
+                ? o.serviceType
+                : "Revisión";
+
             return {
-              id: String(o.id || `ord-${Date.now()}-${idx}`).slice(0, 64),
+              id: String(o.id || `srv-${Date.now()}-${idx}`).slice(0, 64),
               customerId: String(o.customerId || o.customer.id || "").slice(
                 0,
                 64
@@ -806,20 +870,51 @@ class LocalGaliciaStorageService {
                 village: String(o.customer.village || "").trim().slice(0, 240),
                 phone: String(o.customer.phone || "").trim().slice(0, 40),
                 coordinates: { lat, lng },
+                equipmentInfo: String(o.customer.equipmentInfo || "")
+                  .trim()
+                  .slice(0, 160),
                 internalNotes: String(o.customer.internalNotes || "")
                   .trim()
                   .slice(0, 500),
                 createdAt: String(o.customer.createdAt || now),
                 updatedAt: String(o.customer.updatedAt || now),
               },
-              sacks,
-              totalWeightKg: sacks * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
-              orderNotes: String(o.orderNotes || "").trim().slice(0, 500),
+              serviceType,
+              priority: o.priority === "Urgente" ? "Urgente" : "Normal",
+              equipmentInfo: String(
+                o.equipmentInfo || o.customer.equipmentInfo || ""
+              )
+                .trim()
+                .slice(0, 160),
+              estimatedMinutes: Math.max(
+                15,
+                Math.min(480, Math.round(Number(o.estimatedMinutes) || 45))
+              ),
+              actualMinutes: o.actualMinutes
+                ? Math.max(5, Math.min(480, Math.round(Number(o.actualMinutes))))
+                : undefined,
+              estimatedPriceEur: Math.max(
+                0,
+                Number(o.estimatedPriceEur) || 0
+              ),
+              collectedPriceEur:
+                o.collectedPriceEur !== undefined
+                  ? Math.max(0, Number(o.collectedPriceEur) || 0)
+                  : undefined,
+              technicalNotes: String(
+                o.technicalNotes || o.orderNotes || ""
+              )
+                .trim()
+                .slice(0, 500),
+              resolutionNote: o.resolutionNote
+                ? String(o.resolutionNote).trim().slice(0, 200)
+                : undefined,
+              concello: extractConcelloFromVillage(o.customer.village),
               createdAt: String(o.createdAt || now),
               status,
             };
           })
-          .filter((o: PendingOrder | null): o is PendingOrder => o !== null);
+          .filter((o: ServiceOrder | null): o is ServiceOrder => o !== null);
 
         this.write(STORAGE_KEYS.ORDERS, sanitizedOrders);
       }
@@ -827,22 +922,28 @@ class LocalGaliciaStorageService {
       if (parsed.data.config && typeof parsed.data.config === "object") {
         const rawCfg = parsed.data.config;
         const currentCfg = this.getConfig();
-        const cap = Math.max(
-          10,
-          Math.min(
-            500,
-            Math.floor(
-              Number(rawCfg.vanCapacitySacks) || currentCfg.vanCapacitySacks
-            )
-          )
-        );
         const whLat = Number(rawCfg.warehouseCoordinates?.lat);
         const whLng = Number(rawCfg.warehouseCoordinates?.lng);
 
-        const safeCfg: VanConfig = {
+        const safeCfg: TechnicianConfig = {
           ...currentCfg,
-          vanCapacitySacks: cap,
-          maxWeightKg: cap * PELLET_GALICIA_RULES.SACK_WEIGHT_KG,
+          maxWorkdayMinutes: Math.max(
+            60,
+            Math.min(
+              960,
+              Number(rawCfg.maxWorkdayMinutes) || currentCfg.maxWorkdayMinutes
+            )
+          ),
+          maxStopsPerRoute: Math.max(
+            1,
+            Math.min(
+              30,
+              Number(rawCfg.maxStopsPerRoute) || currentCfg.maxStopsPerRoute
+            )
+          ),
+          workdayStartTime: String(
+            rawCfg.workdayStartTime || currentCfg.workdayStartTime
+          ).slice(0, 5),
           warehouseName: String(
             rawCfg.warehouseName || currentCfg.warehouseName
           )
@@ -863,21 +964,17 @@ class LocalGaliciaStorageService {
                 ? whLng
                 : currentCfg.warehouseCoordinates.lng,
           },
-          consumoVacioL100: Math.max(
+          consumoL100: Math.max(
             2,
-            Math.min(40, Number(rawCfg.consumoVacioL100) || 8.5)
-          ),
-          extraConsumoPorTonelada: Math.max(
-            0,
-            Math.min(20, Number(rawCfg.extraConsumoPorTonelada) || 2.2)
+            Math.min(35, Number(rawCfg.consumoL100) || 7.5)
           ),
           precioCombustible: Math.max(
             0.3,
             Math.min(10, Number(rawCfg.precioCombustible) || 1.55)
           ),
-          precioPorSaco: Math.max(
-            0.5,
-            Math.min(50, Number(rawCfg.precioPorSaco) || 4.5)
+          hourlyCostEur: Math.max(
+            0,
+            Math.min(300, Number(rawCfg.hourlyCostEur) || 0)
           ),
         };
         this.write(STORAGE_KEYS.CONFIG, safeCfg);
@@ -895,16 +992,11 @@ class LocalGaliciaStorageService {
     }
   }
 
-  // Vaciar completamente la base de datos (0 clientes y 0 pedidos)
   clearAllData(): void {
     if (!this.isBrowser()) return;
     this.write(STORAGE_KEYS.CUSTOMERS, []);
     this.write(STORAGE_KEYS.ORDERS, []);
   }
-
-  resetDemoData(): void {
-    this.clearAllData();
-  }
 }
 
-export const galiciaStorage = new LocalGaliciaStorageService();
+export const galiciaStorage = new LocalFieldServiceStorage();

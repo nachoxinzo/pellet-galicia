@@ -27,7 +27,7 @@ export default function GaliciaBackupModal({
       const a = document.createElement("a");
       const dateStr = new Date().toISOString().split("T")[0];
       a.href = url;
-      a.download = `PelletGalicia_Backup_${dateStr}.json`;
+      a.download = `SATRuta_Backup_${dateStr}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -61,7 +61,7 @@ export default function GaliciaBackupModal({
     } catch {
       setFeedback({
         type: "error",
-        text: "❌ El archivo no es un backup válido de PelletGalicia.",
+        text: "❌ El archivo no es un backup válido de SATRuta.",
       });
     }
   };
