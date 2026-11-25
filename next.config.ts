@@ -9,7 +9,7 @@ const nextConfig: NextConfig = {
         headers: [
           { key: "X-Frame-Options", value: "DENY" },
           { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(), geolocation=(self)",
@@ -24,7 +24,7 @@ const nextConfig: NextConfig = {
               "default-src 'self'",
               "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
               "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: blob: https://*.google.com https://*.googleapis.com https://*.gstatic.com https://*.openstreetmap.org https://server.arcgisonline.com",
+              "img-src 'self' data: blob: https://*.google.com https://*.googleapis.com https://*.gstatic.com https://*.basemaps.cartocdn.com https://*.openstreetmap.org https://server.arcgisonline.com",
               "connect-src 'self' https://router.project-osrm.org https://nominatim.openstreetmap.org https://photon.komoot.io https://www.cartociudad.es https://*.google.com https://*.googleapis.com",
               "font-src 'self' data:",
               "frame-ancestors 'none'",

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MapContainer,
   TileLayer,
@@ -13,6 +13,48 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Coordinates, ServiceOrder } from "@/types/pelletGalicia";
 import { getServiceTypeBadgeMeta } from "@/utils/satUiHelpers";
+
+type RouteMapLayerKey = "dark" | "street" | "satellite" | "fallback";
+
+interface TileProviderConfig {
+  label: string;
+  url: string;
+  attribution: string;
+  subdomains?: string[];
+  maxZoom: number;
+}
+
+const ROUTE_TILE_PROVIDERS: Record<RouteMapLayerKey, TileProviderConfig> = {
+  dark: {
+    label: "Oscuro",
+    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: ["a", "b", "c", "d"],
+    maxZoom: 20,
+  },
+  street: {
+    label: "Calle",
+    url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: ["a", "b", "c", "d"],
+    maxZoom: 20,
+  },
+  satellite: {
+    label: "Satélite",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+    maxZoom: 19,
+  },
+  fallback: {
+    label: "Esri Calle",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution: "Tiles &copy; Esri",
+    maxZoom: 19,
+  },
+};
 
 export interface MapWarehouseLocation {
   name: string;
@@ -143,6 +185,27 @@ export default function DeliveryRouteMap({
   osrmPolyline,
   height = "400px",
 }: DeliveryRouteMapProps) {
+  const [activeLayer, setActiveLayer] = useState<RouteMapLayerKey>("dark");
+  const [fallbackActive, setFallbackActive] = useState(false);
+  const tileErrorCountRef = useRef(0);
+
+  const handleSelectLayer = useCallback((layer: RouteMapLayerKey) => {
+    tileErrorCountRef.current = 0;
+    setFallbackActive(false);
+    setActiveLayer(layer);
+  }, []);
+
+  const handleTileError = useCallback(() => {
+    tileErrorCountRef.current += 1;
+    if (tileErrorCountRef.current > 3 && activeLayer !== "fallback") {
+      tileErrorCountRef.current = 0;
+      setActiveLayer("fallback");
+      setFallbackActive(true);
+    }
+  }, [activeLayer]);
+
+  const currentProvider = ROUTE_TILE_PROVIDERS[activeLayer];
+
   const selectedOrderIds = useMemo(
     () => new Set(selectedOrders.map((o) => o.id)),
     [selectedOrders]
@@ -176,8 +239,35 @@ export default function DeliveryRouteMap({
   return (
     <div
       style={{ height }}
-      className="w-full rounded-2xl overflow-hidden border border-slate-700 shadow-sm relative z-0"
+      className="w-full rounded-2xl overflow-hidden border border-white/[0.08] bg-slate-950 shadow-sm relative z-0"
     >
+      {/* Selector de capas Dark Slate Glass */}
+      <div className="absolute top-3 left-14 z-[450] flex items-center gap-1 bg-slate-900/80 backdrop-blur-md border border-white/[0.1] rounded-xl p-1 shadow-lg">
+        {(["dark", "street", "satellite"] as const).map((key) => {
+          const isSelected = activeLayer === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => handleSelectLayer(key)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                isSelected
+                  ? "bg-amber-500 text-slate-950 shadow-sm"
+                  : "text-slate-300 hover:text-white hover:bg-white/[0.06]"
+              }`}
+            >
+              {ROUTE_TILE_PROVIDERS[key].label}
+            </button>
+          );
+        })}
+      </div>
+
+      {fallbackActive && (
+        <div className="absolute bottom-3 left-3 z-[450] bg-slate-900/85 backdrop-blur-md border border-amber-500/30 text-amber-300 text-[11px] font-medium px-2.5 py-1 rounded-lg shadow-md">
+          Capa alternativa Esri activada automáticamente
+        </div>
+      )}
+
       <MapContainer
         center={[warehouse.coordinates.lat, warehouse.coordinates.lng]}
         zoom={11}
@@ -185,8 +275,16 @@ export default function DeliveryRouteMap({
         style={{ height: "100%", width: "100%" }}
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          key={activeLayer}
+          attribution={currentProvider.attribution}
+          url={currentProvider.url}
+          {...(currentProvider.subdomains
+            ? { subdomains: currentProvider.subdomains }
+            : {})}
+          maxZoom={currentProvider.maxZoom}
+          eventHandlers={{
+            tileerror: handleTileError,
+          }}
         />
 
         <AutoFitBounds points={allCoordinates} />
