@@ -1,21 +1,21 @@
 "use client";
 
-import React, { useState, useEffect, Suspense, useMemo } from "react";
+import React, { useState, useEffect, Suspense, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
 import {
   EphemeralStop,
-  EphemeralTripPayload,
+  ServiceOrder,
   ServiceType,
   Coordinates,
+  TechnicianConfig,
+  UserProfile,
 } from "@/types/pelletGalicia";
 import {
-  decodeTripPayload,
   buildGoogleMapsSingleClientUrl,
-  buildTripPayloadFromOrders,
-  encodeReturnReceipt,
+  extractTechTagsFromNotes,
 } from "@/utils/galiciaUrlCodec";
-import { galiciaStorage } from "@/services/galiciaStorage";
+import { cloudApi } from "@/services/cloudApi";
+import { DEFAULT_TECH_CONFIG } from "@/services/galiciaStorage";
 import {
   formatHoursMinutes,
   getServiceTypeBadgeMeta,
@@ -26,7 +26,6 @@ import {
   Wrench,
   MapPin,
   ShieldCheck,
-  AlertCircle,
   Map,
   Home,
   Check,
@@ -34,30 +33,58 @@ import {
   WifiOff,
   Banknote,
   Phone,
-  MessageCircle,
   Clock,
   RefreshCw,
   ClipboardCheck,
   Flame,
   Cog,
-  Laptop,
   ArrowLeft,
+  LogOut,
+  CloudUpload,
+  Loader2,
 } from "lucide-react";
 
-const EPHEMERAL_STORAGE_KEY = "satruta_ephemeral_payload_session";
-const COMPLETED_STATS_KEY = "satruta_completed_stats_session";
+const CLOUD_CACHE_KEY = "satruta_cloud_tech_cache_v1";
+const OFFLINE_QUEUE_KEY = "satruta_offline_queue_v1";
 
-interface CompletedStats {
-  completedStopsCount: number;
-  completedMinutesCount: number;
-  collectedCashEur: number;
-  deliveredItems: {
-    shortId: string;
-    serviceType: ServiceType;
-    actualMinutes: number;
-    cashCollectedEur: number;
-    resolutionNote?: string;
-  }[];
+interface QueuedCompletion {
+  orderId: string;
+  actualMinutes: number;
+  collectedPriceEur: number;
+  resolutionNote?: string;
+  serviceType: ServiceType;
+  queuedAt: string;
+}
+
+interface CompletedSessionStats {
+  completedCount: number;
+  completedMinutes: number;
+  collectedEur: number;
+}
+
+function ordersToStops(orders: ServiceOrder[]): EphemeralStop[] {
+  return orders.map((ord, idx) => {
+    const notes = ord.technicalNotes || ord.customer.internalNotes || "";
+    const { tags, cashToCollectEur } = extractTechTagsFromNotes(
+      notes,
+      ord.estimatedPriceEur
+    );
+    return {
+      seq: idx + 1,
+      id: ord.id,
+      name: ord.customer.name,
+      village: ord.customer.village,
+      lat: ord.customer.coordinates.lat,
+      lng: ord.customer.coordinates.lng,
+      serviceType: ord.serviceType,
+      priority: ord.priority,
+      estimatedMinutes: ord.estimatedMinutes,
+      equipmentInfo: ord.equipmentInfo || ord.customer.equipmentInfo,
+      cashToCollectEur,
+      tags: tags || undefined,
+      phone: ord.customer.phone || undefined,
+    };
+  });
 }
 
 function ServiceTypeIcon({
@@ -75,28 +102,46 @@ function ServiceTypeIcon({
   return <ClipboardCheck className={className} />;
 }
 
-function TechTerminalContent() {
-  const searchParams = useSearchParams();
+function readOfflineQueue(): QueuedCompletion[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(OFFLINE_QUEUE_KEY);
+    return raw ? (JSON.parse(raw) as QueuedCompletion[]) : [];
+  } catch {
+    return [];
+  }
+}
 
-  const [terminalMode, setTerminalMode] = useState<"ephemeral" | "local">(
-    "ephemeral"
-  );
-  const [payload, setPayload] = useState<EphemeralTripPayload | null>(null);
+function writeOfflineQueue(items: QueuedCompletion[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (items.length === 0) {
+      localStorage.removeItem(OFFLINE_QUEUE_KEY);
+    } else {
+      localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(items));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function TechTerminalContent() {
   const [stops, setStops] = useState<EphemeralStop[]>([]);
-  const [stats, setStats] = useState<CompletedStats>({
-    completedStopsCount: 0,
-    completedMinutesCount: 0,
-    collectedCashEur: 0,
-    deliveredItems: [],
+  const [config, setConfig] = useState<TechnicianConfig>(DEFAULT_TECH_CONFIG);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [stats, setStats] = useState<CompletedSessionStats>({
+    completedCount: 0,
+    completedMinutes: 0,
+    collectedEur: 0,
   });
-  const [localPendingCount, setLocalPendingCount] = useState<number>(0);
-  const [manualLinkInput, setManualLinkInput] = useState<string>("");
-  const [manualLoadError, setManualLoadError] = useState<string | null>(null);
+  const [offlineQueue, setOfflineQueue] = useState<QueuedCompletion[]>([]);
+  const [isSyncingQueue, setIsSyncingQueue] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
 
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [copiedStopId, setCopiedStopId] = useState<string | null>(null);
-  const [copiedReceiptToken, setCopiedReceiptToken] = useState(false);
+  const [statusNotice, setStatusNotice] = useState<string | null>(null);
 
   // Modal de Cierre de Parte
   const [confirmingStop, setConfirmingStop] = useState<EphemeralStop | null>(
@@ -105,12 +150,103 @@ function TechTerminalContent() {
   const [actualMinutesInput, setActualMinutesInput] = useState<number>(45);
   const [collectedCashInput, setCollectedCashInput] = useState<string>("0");
   const [resolutionNoteInput, setResolutionNoteInput] = useState<string>("");
+  const [isSubmittingClose, setIsSubmittingClose] = useState(false);
+
+  const syncOfflineQueue = useCallback(async () => {
+    const currentQueue = readOfflineQueue();
+    if (currentQueue.length === 0 || !navigator.onLine) return;
+
+    setIsSyncingQueue(true);
+    const remaining: QueuedCompletion[] = [];
+
+    for (const item of currentQueue) {
+      try {
+        await cloudApi.completeTechOrder(item.orderId, {
+          actualMinutes: item.actualMinutes,
+          collectedPriceEur: item.collectedPriceEur,
+          resolutionNote: item.resolutionNote,
+          serviceType: item.serviceType,
+        });
+      } catch (err) {
+        // Si es error de red, mantener en cola; si ya estaba cerrado (404/409), descartar
+        const status =
+          typeof err === "object" && err !== null && "status" in err
+            ? (err as { status: number }).status
+            : 0;
+        if (status !== 404 && status !== 409) {
+          remaining.push(item);
+        }
+      }
+    }
+
+    writeOfflineQueue(remaining);
+    setOfflineQueue(remaining);
+    setIsSyncingQueue(false);
+
+    if (remaining.length === 0) {
+      setStatusNotice("Cierres offline sincronizados con la nube");
+      setTimeout(() => setStatusNotice(null), 3500);
+    }
+  }, []);
+
+  const loadFromCloud = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      await syncOfflineQueue();
+
+      const res = await cloudApi.getTechOrders();
+      const queuedIds = new Set(readOfflineQueue().map((q) => q.orderId));
+      const mappedStops = ordersToStops(
+        res.orders.filter((o) => !queuedIds.has(o.id))
+      );
+
+      setStops(mappedStops);
+      if (res.config) setConfig(res.config);
+      setProfile(res.profile);
+
+      try {
+        sessionStorage.setItem(
+          CLOUD_CACHE_KEY,
+          JSON.stringify({
+            stops: mappedStops,
+            config: res.config || DEFAULT_TECH_CONFIG,
+            profile: res.profile,
+          })
+        );
+      } catch {
+        // ignore
+      }
+    } catch {
+      // Fallback offline a caché de sesión del mismo turno
+      try {
+        const raw = sessionStorage.getItem(CLOUD_CACHE_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw);
+          const queuedIds = new Set(readOfflineQueue().map((q) => q.orderId));
+          const cachedStops: EphemeralStop[] = Array.isArray(cached.stops)
+            ? cached.stops.filter((s: EphemeralStop) => !queuedIds.has(s.id))
+            : [];
+          setStops(cachedStops);
+          if (cached.config) setConfig(cached.config);
+          if (cached.profile) setProfile(cached.profile);
+        }
+      } catch {
+        // ignore
+      }
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [syncOfflineQueue]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     setIsOnline(navigator.onLine);
+    setOfflineQueue(readOfflineQueue());
 
-    const handleOnline = () => setIsOnline(true);
+    const handleOnline = () => {
+      setIsOnline(true);
+      loadFromCloud();
+    };
     const handleOffline = () => setIsOnline(false);
 
     window.addEventListener("online", handleOnline);
@@ -120,138 +256,14 @@ function TechTerminalContent() {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
     };
-  }, []);
+  }, [loadFromCloud]);
 
-  const loadFromLocalStorage = () => {
-    const pending = galiciaStorage.getPendingOrders();
-    setLocalPendingCount(pending.length);
-    if (pending.length > 0) {
-      const cfg = galiciaStorage.getConfig();
-      const localPayload = buildTripPayloadFromOrders(pending, cfg);
-      setTerminalMode("local");
-      setPayload(localPayload);
-      setStops(localPayload.stops);
-      return true;
-    }
-    return false;
-  };
-
-  // Carga Dual: 1) ?r= efímero | 2) sessionStorage efímero | 3) Cola Local del mismo navegador
   useEffect(() => {
-    const rawR = searchParams.get("r") || searchParams.get("data");
-
-    if (rawR) {
-      const decoded = decodeTripPayload(rawR);
-      if (decoded && decoded.stops && decoded.stops.length > 0) {
-        setTerminalMode("ephemeral");
-        setPayload(decoded);
-        setStops(decoded.stops);
-        const initialStats: CompletedStats = {
-          completedStopsCount: 0,
-          completedMinutesCount: 0,
-          collectedCashEur: 0,
-          deliveredItems: [],
-        };
-        setStats(initialStats);
-
-        try {
-          sessionStorage.setItem(
-            EPHEMERAL_STORAGE_KEY,
-            JSON.stringify(decoded)
-          );
-          sessionStorage.setItem(
-            COMPLETED_STATS_KEY,
-            JSON.stringify(initialStats)
-          );
-        } catch (e) {
-          console.warn("Error guardando en sessionStorage:", e);
-        }
-
-        if (typeof window !== "undefined") {
-          window.history.replaceState(
-            {},
-            document.title,
-            window.location.pathname
-          );
-        }
-
-        setIsLoaded(true);
-        return;
-      }
-    }
-
-    // 2. Sesión efímera activa en sessionStorage
-    try {
-      const rawStored = sessionStorage.getItem(EPHEMERAL_STORAGE_KEY);
-      const rawStats = sessionStorage.getItem(COMPLETED_STATS_KEY);
-      if (rawStored) {
-        const storedPayload = JSON.parse(rawStored) as EphemeralTripPayload;
-        if (storedPayload?.stops?.length > 0) {
-          setTerminalMode("ephemeral");
-          setPayload(storedPayload);
-          setStops(storedPayload.stops);
-          if (rawStats) {
-            const parsedStats = JSON.parse(rawStats);
-            setStats({
-              completedStopsCount: parsedStats.completedStopsCount || 0,
-              completedMinutesCount: parsedStats.completedMinutesCount || 0,
-              collectedCashEur: parsedStats.collectedCashEur || 0,
-              deliveredItems: Array.isArray(parsedStats.deliveredItems)
-                ? parsedStats.deliveredItems
-                : [],
-            });
-          }
-          setIsLoaded(true);
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn("Error leyendo sesión previa:", e);
-    }
-
-    // 3. Fallback inteligente: Leer avisos activos guardados en este mismo navegador
-    loadFromLocalStorage();
-    setIsLoaded(true);
-  }, [searchParams]);
-
-  const handleLoadManualLink = () => {
-    setManualLoadError(null);
-    const trimmed = manualLinkInput.trim();
-    if (!trimmed) return;
-
-    let token = trimmed;
-    const match = trimmed.match(/[?&](?:r|data)=([^&\s]+)/);
-    if (match && match[1]) {
-      token = match[1];
-    }
-
-    const decoded = decodeTripPayload(token);
-    if (!decoded || !decoded.stops || decoded.stops.length === 0) {
-      setManualLoadError(
-        "No se pudo leer ese enlace o código. Asegúrate de pegar el enlace completo de SATRuta."
-      );
-      return;
-    }
-
-    setTerminalMode("ephemeral");
-    setPayload(decoded);
-    setStops(decoded.stops);
-    const initialStats: CompletedStats = {
-      completedStopsCount: 0,
-      completedMinutesCount: 0,
-      collectedCashEur: 0,
-      deliveredItems: [],
-    };
-    setStats(initialStats);
-    setManualLinkInput("");
-
-    try {
-      sessionStorage.setItem(EPHEMERAL_STORAGE_KEY, JSON.stringify(decoded));
-      sessionStorage.setItem(COMPLETED_STATS_KEY, JSON.stringify(initialStats));
-    } catch {
-      // ignore
-    }
-  };
+    (async () => {
+      await loadFromCloud();
+      setIsLoaded(true);
+    })();
+  }, [loadFromCloud]);
 
   const openCloseModal = (stop: EphemeralStop) => {
     setConfirmingStop(stop);
@@ -264,75 +276,95 @@ function TechTerminalContent() {
     setResolutionNoteInput("");
   };
 
-  const handleExecuteCompletion = () => {
-    if (!confirmingStop) return;
+  const handleExecuteCompletion = async () => {
+    if (!confirmingStop || isSubmittingClose) return;
+    setIsSubmittingClose(true);
 
-    const remaining = stops.filter((s) => s.id !== confirmingStop.id);
-    const shortId =
-      confirmingStop.id.replace(/^(eph-|ord-|srv-)/g, "").slice(-6) ||
-      String(confirmingStop.seq);
     const parsedCash = Math.max(
       0,
       parseFloat(collectedCashInput.replace(",", ".")) || 0
     );
     const safeMinutes = Math.max(5, Math.min(480, actualMinutesInput || 45));
+    const trimmedNote = resolutionNoteInput.trim() || undefined;
 
-    // Si estamos en Modo Local (mismo navegador que /admin), sincronizar el cierre directamente
-    if (terminalMode === "local") {
-      galiciaStorage.completeOrderFromTech(confirmingStop.id, {
-        actualMinutes: safeMinutes,
-        collectedPriceEur: parsedCash,
-        resolutionNote: resolutionNoteInput.trim() || undefined,
-        serviceType: confirmingStop.serviceType,
-      });
-      setLocalPendingCount(galiciaStorage.getPendingOrders().length);
-    }
-
-    const newStats: CompletedStats = {
-      completedStopsCount: stats.completedStopsCount + 1,
-      completedMinutesCount: stats.completedMinutesCount + safeMinutes,
-      collectedCashEur: Number((stats.collectedCashEur + parsedCash).toFixed(2)),
-      deliveredItems: [
-        ...(stats.deliveredItems || []),
-        {
-          shortId,
-          serviceType: confirmingStop.serviceType,
-          actualMinutes: safeMinutes,
-          cashCollectedEur: parsedCash,
-          ...(resolutionNoteInput.trim()
-            ? { resolutionNote: resolutionNoteInput.trim().slice(0, 60) }
-            : {}),
-        },
-      ],
-    };
-
-    setStops(remaining);
-    setStats(newStats);
-    setConfirmingStop(null);
-
-    if (terminalMode === "ephemeral") {
+    let savedInCloud = false;
+    if (navigator.onLine) {
       try {
-        if (payload) {
-          const updatedPayload: EphemeralTripPayload = {
-            ...payload,
-            stops: remaining,
-          };
-          setPayload(updatedPayload);
-
-          if (remaining.length > 0) {
-            sessionStorage.setItem(
-              EPHEMERAL_STORAGE_KEY,
-              JSON.stringify(updatedPayload)
-            );
-          } else {
-            sessionStorage.removeItem(EPHEMERAL_STORAGE_KEY);
-          }
+        await cloudApi.completeTechOrder(confirmingStop.id, {
+          actualMinutes: safeMinutes,
+          collectedPriceEur: parsedCash,
+          resolutionNote: trimmedNote,
+          serviceType: confirmingStop.serviceType,
+        });
+        savedInCloud = true;
+      } catch (err) {
+        const status =
+          typeof err === "object" && err !== null && "status" in err
+            ? (err as { status: number }).status
+            : 0;
+        if (status === 404 || status === 409) {
+          savedInCloud = true;
         }
-        sessionStorage.setItem(COMPLETED_STATS_KEY, JSON.stringify(newStats));
-      } catch (e) {
-        console.warn("Error actualizando sessionStorage:", e);
       }
     }
+
+    if (!savedInCloud) {
+      const nextQueue: QueuedCompletion[] = [
+        ...readOfflineQueue(),
+        {
+          orderId: confirmingStop.id,
+          actualMinutes: safeMinutes,
+          collectedPriceEur: parsedCash,
+          resolutionNote: trimmedNote,
+          serviceType: confirmingStop.serviceType,
+          queuedAt: new Date().toISOString(),
+        },
+      ];
+      writeOfflineQueue(nextQueue);
+      setOfflineQueue(nextQueue);
+    }
+
+    const remaining = stops
+      .filter((s) => s.id !== confirmingStop.id)
+      .map((s, idx) => ({ ...s, seq: idx + 1 }));
+
+    setStops(remaining);
+    setStats((prev) => ({
+      completedCount: prev.completedCount + 1,
+      completedMinutes: prev.completedMinutes + safeMinutes,
+      collectedEur: Number((prev.collectedEur + parsedCash).toFixed(2)),
+    }));
+
+    try {
+      sessionStorage.setItem(
+        CLOUD_CACHE_KEY,
+        JSON.stringify({ stops: remaining, config, profile })
+      );
+    } catch {
+      // ignore
+    }
+
+    setConfirmingStop(null);
+    setIsSubmittingClose(false);
+    setStatusNotice(
+      savedInCloud
+        ? "Parte cerrado y sincronizado en la nube"
+        : "Sin cobertura: parte guardado en cola offline para sincronizar luego"
+    );
+    setTimeout(() => setStatusNotice(null), 3500);
+  };
+
+  const handleLogout = async () => {
+    try {
+      sessionStorage.removeItem(CLOUD_CACHE_KEY);
+      if (readOfflineQueue().length === 0) {
+        localStorage.removeItem(OFFLINE_QUEUE_KEY);
+      }
+    } catch {
+      // ignore
+    }
+    await cloudApi.logout();
+    window.location.href = "/login";
   };
 
   const handleNavigateToCustomer = (coords: Coordinates) => {
@@ -363,9 +395,9 @@ function TechTerminalContent() {
   };
 
   const multiStopGoogleMapsUrl = useMemo(() => {
-    if (!payload || stops.length === 0) return "";
-    const warehouseCoords = payload.warehouse;
-    const warehouseStr = `${warehouseCoords.lat.toFixed(6)},${warehouseCoords.lng.toFixed(6)}`;
+    if (stops.length === 0) return "";
+    const wh = config.warehouseCoordinates;
+    const warehouseStr = `${wh.lat.toFixed(6)},${wh.lng.toFixed(6)}`;
 
     if (stops.length === 1) {
       const stop = stops[0];
@@ -380,7 +412,7 @@ function TechTerminalContent() {
     return `https://www.google.com/maps/dir/?api=1&destination=${warehouseStr}&waypoints=${encodeURIComponent(
       waypoints
     )}&travelmode=driving`;
-  }, [payload, stops]);
+  }, [config, stops]);
 
   const handleOpenMultiStopRoute = () => {
     if (multiStopGoogleMapsUrl) {
@@ -389,8 +421,8 @@ function TechTerminalContent() {
   };
 
   const handleReturnToWarehouse = () => {
-    if (!payload?.warehouse) return;
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${payload.warehouse.lat.toFixed(6)},${payload.warehouse.lng.toFixed(6)}&travelmode=driving`;
+    const wh = config.warehouseCoordinates;
+    const url = `https://www.google.com/maps/dir/?api=1&destination=${wh.lat.toFixed(6)},${wh.lng.toFixed(6)}&travelmode=driving`;
     window.open(url, "_blank");
   };
 
@@ -400,42 +432,18 @@ function TechTerminalContent() {
     (sum, s) => sum + (s.estimatedMinutes || 45),
     0
   );
-  const totalTripStops = stats.completedStopsCount + stops.length;
+  const totalTripStops = stats.completedCount + stops.length;
   const completedPercent =
     totalTripStops > 0
-      ? Math.round((stats.completedStopsCount / totalTripStops) * 100)
+      ? Math.round((stats.completedCount / totalTripStops) * 100)
       : 0;
-
-  const returnReceiptToken = useMemo(() => {
-    if (!stats.deliveredItems || stats.deliveredItems.length === 0) return "";
-    return encodeReturnReceipt({
-      tripNum: payload?.tripNum || 1,
-      date: payload?.date || new Date().toISOString().split("T")[0],
-      closedAtTime: new Date().toTimeString().slice(0, 5),
-      deliveredItems: stats.deliveredItems,
-      totalMinutesWorked: stats.completedMinutesCount,
-      totalCashCollectedEur: stats.collectedCashEur,
-    });
-  }, [stats, payload]);
-
-  const handleSendReturnReceiptWhatsApp = () => {
-    if (!returnReceiptToken) return;
-    const msg =
-      `✅ *Cierre de Turno SATRuta #${payload?.tripNum || 1}*\n` +
-      `🔧 Avisos cerrados: ${stats.completedStopsCount} (${formatHoursMinutes(
-        stats.completedMinutesCount
-      )} trabajadas)\n` +
-      `💶 Importe total cobrado: ${stats.collectedCashEur.toFixed(2)} €\n\n` +
-      `🔑 Código de Conciliación Admin:\n${returnReceiptToken}`;
-    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank");
-  };
 
   if (!isLoaded) {
     return (
       <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-4">
         <div className="flex items-center gap-3 text-slate-400 text-sm font-medium">
-          <Wrench className="w-5 h-5 text-amber-500 animate-spin" />
-          <span>Iniciando terminal de técnico...</span>
+          <Loader2 className="w-5 h-5 text-amber-500 animate-spin" />
+          <span>Cargando avisos asignados desde la nube...</span>
         </div>
       </div>
     );
@@ -449,8 +457,35 @@ function TechTerminalContent() {
           <div className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold flex items-center gap-2.5">
             <WifiOff className="w-4 h-4 text-amber-400 shrink-0" />
             <span>
-              Modo sin cobertura activo. Tus partes siguen guardados en memoria; no cierres esta pestaña.
+              Modo sin cobertura activo. Tus cierres se guardan en este dispositivo y se subirán al recuperar señal.
             </span>
+          </div>
+        )}
+
+        {offlineQueue.length > 0 && (
+          <div className="p-3 rounded-xl bg-sky-500/15 border border-sky-500/40 text-sky-200 text-xs font-semibold flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CloudUpload className="w-4 h-4 text-sky-400 shrink-0" />
+              <span>
+                {offlineQueue.length} parte(s) pendientes de subir a la nube
+              </span>
+            </div>
+            {isOnline && (
+              <button
+                type="button"
+                disabled={isSyncingQueue}
+                onClick={syncOfflineQueue}
+                className="px-2.5 py-1 rounded-lg bg-sky-500 text-slate-950 font-black text-[11px]"
+              >
+                {isSyncingQueue ? "Subiendo..." : "Sincronizar"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {statusNotice && (
+          <div className="p-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 text-xs font-semibold text-center">
+            {statusNotice}
           </div>
         )}
 
@@ -463,36 +498,41 @@ function TechTerminalContent() {
                   : "bg-amber-400 animate-ping"
               }`}
             />
-            <h1 className="text-xs font-bold uppercase tracking-wider text-amber-400 truncate">
-              SATRuta · Técnico
-            </h1>
-            {terminalMode === "local" && stops.length > 0 && (
-              <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30 shrink-0">
-                <Laptop className="w-3 h-3" />
-                Cola local
-              </span>
-            )}
+            <div className="min-w-0">
+              <h1 className="text-xs font-bold uppercase tracking-wider text-amber-400 truncate">
+                SATRuta · Técnico
+              </h1>
+              {profile && (
+                <span className="text-[11px] text-slate-400 block truncate">
+                  {profile.fullName || profile.email}
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
-            {terminalMode === "local" && (
-              <button
-                type="button"
-                onClick={loadFromLocalStorage}
-                title="Sincronizar con los últimos avisos guardados en /admin"
-                className="p-1.5 rounded-lg bg-slate-900 border border-white/[0.08] text-slate-300 hover:text-amber-400 transition"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={isRefreshing || !isOnline}
+              onClick={loadFromCloud}
+              title="Actualizar avisos desde la nube"
+              className="p-1.5 rounded-lg bg-slate-900 border border-white/[0.08] text-slate-300 hover:text-amber-400 disabled:opacity-40 transition"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`}
+              />
+            </button>
             <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-900 border border-white/[0.08] text-slate-300 tabular-nums">
               {stops.length} pend.
             </span>
-            {stats.completedStopsCount > 0 && (
-              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 tabular-nums">
-                {stats.completedStopsCount} cerr.
-              </span>
-            )}
+            <button
+              type="button"
+              onClick={handleLogout}
+              title="Cerrar sesión"
+              className="p-1.5 rounded-lg bg-slate-900 border border-white/[0.08] text-slate-400 hover:text-rose-400 transition"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 
@@ -501,10 +541,10 @@ function TechTerminalContent() {
           <div className="bg-slate-900/65 p-3 rounded-2xl border border-white/[0.08] space-y-2">
             <div className="flex items-center justify-between text-xs font-semibold">
               <span className="text-slate-200 tabular-nums">
-                {stats.completedStopsCount} de {totalTripStops} avisos cerrados
+                {stats.completedCount} de {totalTripStops} avisos cerrados en esta sesión
               </span>
               <span className="font-mono font-bold text-amber-400 tabular-nums">
-                {completedPercent}% completado
+                {completedPercent}%
               </span>
             </div>
             <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-white/[0.06]">
@@ -519,9 +559,9 @@ function TechTerminalContent() {
                 <Clock className="w-3.5 h-3.5 text-amber-400" />
                 Restante est.: {formatHoursMinutes(totalRemainingMinutes)}
               </span>
-              {stats.collectedCashEur > 0 && (
+              {stats.collectedEur > 0 && (
                 <span className="font-mono font-bold text-emerald-400 tabular-nums">
-                  Cobrado: {stats.collectedCashEur.toFixed(2)} €
+                  Cobrado: {stats.collectedEur.toFixed(2)} €
                 </span>
               )}
             </div>
@@ -533,7 +573,7 @@ function TechTerminalContent() {
           <button
             type="button"
             onClick={handleOpenMultiStopRoute}
-            className="w-full min-h-[52px] flex items-center justify-center gap-2.5 py-3 px-4 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-sm shadow-lg shadow-sky-900/30 active:scale-[0.98] transition"
+            className="w-full min-h-[50px] flex items-center justify-center gap-2.5 py-2.5 px-4 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-sm shadow-lg shadow-sky-900/30 active:scale-[0.98] transition"
           >
             <Map className="w-5 h-5 shrink-0" />
             <span>Abrir Ruta Completa en Google Maps ({stops.length})</span>
@@ -544,7 +584,6 @@ function TechTerminalContent() {
       {/* CONTENIDO PRINCIPAL */}
       <main className="flex-1 p-4 space-y-4">
         {stops.length === 0 ? (
-          /* PANTALLA INICIAL O FIN DE JORNADA */
           <div className="bg-slate-900/65 backdrop-blur-md border border-white/[0.08] rounded-3xl p-6 sm:p-7 text-center space-y-5 shadow-2xl my-auto">
             <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/25 text-emerald-400 flex items-center justify-center mx-auto">
               <CheckCircle2 className="w-8 h-8" />
@@ -552,49 +591,34 @@ function TechTerminalContent() {
 
             <div className="space-y-2">
               <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                {stats.completedStopsCount > 0
-                  ? "Jornada Finalizada"
+                {stats.completedCount > 0
+                  ? "Jornada al día"
                   : "Terminal de Técnico"}
               </span>
               <h2 className="text-2xl font-black text-white">
-                {stats.completedStopsCount > 0
-                  ? "Todos los Partes Cerrados"
-                  : "Sin avisos activos en memoria"}
+                {stats.completedCount > 0
+                  ? "Avisos Cerrados y Sincronizados"
+                  : "Sin avisos pendientes"}
               </h2>
               <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
-                {stats.completedStopsCount > 0
-                  ? terminalMode === "local"
-                    ? "Los partes cerrados ya han quedado actualizados automáticamente en tu panel /admin."
-                    : "Los datos personales de los clientes se han purgado de la memoria de este teléfono."
-                  : "Abre el enlace o código QR enviado desde /admin, o carga directamente los avisos guardados en este dispositivo."}
+                {stats.completedCount > 0
+                  ? "Todos tus partes cerrados están actualizados en tiempo real en la nube para el despacho."
+                  : "No tienes averías ni revisiones pendientes asignadas ahora mismo. Pulsa actualizar si oficina acaba de grabar un aviso."}
               </p>
             </div>
 
-            {stats.completedStopsCount === 0 && localPendingCount > 0 && (
-              <button
-                type="button"
-                onClick={loadFromLocalStorage}
-                className="w-full min-h-[54px] flex items-center justify-center gap-2 py-3.5 px-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 active:scale-[0.98] transition"
-              >
-                <Wrench className="w-5 h-5" />
-                <span>
-                  Cargar {localPendingCount} avisos pendientes de este dispositivo
-                </span>
-              </button>
-            )}
-
-            {stats.completedStopsCount > 0 && (
+            {stats.completedCount > 0 && (
               <div className="p-4 bg-slate-950/60 rounded-2xl border border-white/[0.06] text-xs sm:text-sm text-slate-300 space-y-2.5 text-left">
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400">Avisos completados:</span>
                   <strong className="text-white font-mono tabular-nums">
-                    {stats.completedStopsCount} partes
+                    {stats.completedCount} partes
                   </strong>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-slate-400">Tiempo trabajado:</span>
                   <strong className="text-amber-400 font-mono tabular-nums">
-                    {formatHoursMinutes(stats.completedMinutesCount)}
+                    {formatHoursMinutes(stats.completedMinutes)}
                   </strong>
                 </div>
                 <div className="flex justify-between items-center pt-2 border-t border-white/[0.06]">
@@ -602,104 +626,43 @@ function TechTerminalContent() {
                     Total cobrado en ruta:
                   </span>
                   <strong className="text-emerald-400 font-mono text-base font-bold tabular-nums">
-                    {stats.collectedCashEur.toFixed(2)} €
+                    {stats.collectedEur.toFixed(2)} €
                   </strong>
                 </div>
               </div>
             )}
 
-            {/* RESUMEN DE CIERRE ZERO-CLOUD (SOLO NECESARIO EN MODO EFÍMERO) */}
-            {returnReceiptToken && terminalMode === "ephemeral" && (
-              <div className="p-4 bg-slate-950/60 rounded-2xl border border-emerald-500/30 space-y-3 text-left">
-                <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
-                  Liquidación Zero-Cloud (/tecnico ➔ /admin)
-                </div>
-                <p className="text-xs text-slate-400">
-                  Envía este resumen al despacho por WhatsApp para cerrar los partes con tiempos reales y cobros.
-                </p>
-                <div className="flex flex-col gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSendReturnReceiptWhatsApp}
-                    className="w-full min-h-[52px] flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm shadow-lg shadow-emerald-600/20 active:scale-[0.98] transition"
-                  >
-                    <MessageCircle className="w-5 h-5" />
-                    <span>Enviar Resumen por WhatsApp</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard?.writeText(returnReceiptToken);
-                      setCopiedReceiptToken(true);
-                      setTimeout(() => setCopiedReceiptToken(false), 2500);
-                    }}
-                    className="w-full py-2.5 px-3 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 font-mono font-semibold text-xs border border-white/[0.08] flex items-center justify-center gap-1.5"
-                  >
-                    {copiedReceiptToken ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-400" />
-                        <span>Código SAT1 copiado</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-4 h-4 text-amber-400" />
-                        <span>
-                          Copiar código ({returnReceiptToken.slice(0, 14)}...)
-                        </span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* PEGAR ENLACE MANUAL SI NO HAY TURNO CARGADO */}
-            {stats.completedStopsCount === 0 && (
-              <div className="p-4 bg-slate-950/55 rounded-2xl border border-white/[0.06] space-y-2.5 text-left">
-                <label className="text-xs font-semibold text-slate-300 block">
-                  ¿Recibiste un enlace de turno por WhatsApp? Pégalo aquí:
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="https://.../tecnico?r=..."
-                    value={manualLinkInput}
-                    onChange={(e) => setManualLinkInput(e.target.value)}
-                    className="flex-1 px-3 py-2 text-xs bg-slate-900 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleLoadManualLink}
-                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs border border-white/[0.08] shrink-0"
-                  >
-                    Cargar
-                  </button>
-                </div>
-                {manualLoadError && (
-                  <p className="text-xs text-rose-400">{manualLoadError}</p>
-                )}
-              </div>
-            )}
-
             <div className="flex flex-col gap-2.5 pt-1">
-              {payload?.warehouse && (
-                <button
-                  type="button"
-                  onClick={handleReturnToWarehouse}
-                  className="w-full min-h-[52px] flex items-center justify-center gap-2 py-3.5 px-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm active:scale-[0.98] transition"
-                >
-                  <Home className="w-5 h-5" />
-                  <span>Volver a Base ({payload.warehouse.name})</span>
-                </button>
-              )}
-
-              <Link
-                href="/admin"
-                className="w-full py-3 px-4 rounded-2xl bg-slate-800/70 hover:bg-slate-800 text-slate-300 hover:text-white font-semibold text-xs border border-white/[0.08] flex items-center justify-center gap-2 transition"
+              <button
+                type="button"
+                disabled={isRefreshing || !isOnline}
+                onClick={loadFromCloud}
+                className="w-full min-h-[50px] flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-sm border border-white/[0.08] transition"
               >
-                <ArrowLeft className="w-4 h-4" />
-                <span>Ir al Despacho / Coordinación (/admin)</span>
-              </Link>
+                <RefreshCw
+                  className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`}
+                />
+                <span>Comprobar nuevos avisos</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleReturnToWarehouse}
+                className="w-full min-h-[50px] flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm active:scale-[0.98] transition"
+              >
+                <Home className="w-5 h-5" />
+                <span>Volver a Base ({config.warehouseName})</span>
+              </button>
+
+              {profile?.role === "admin" && (
+                <Link
+                  href="/admin"
+                  className="w-full py-3 px-4 rounded-2xl bg-slate-800/70 hover:bg-slate-800 text-slate-300 hover:text-white font-semibold text-xs border border-white/[0.08] flex items-center justify-center gap-2 transition"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  <span>Volver al Despacho (/admin)</span>
+                </Link>
+              )}
             </div>
           </div>
         ) : (
@@ -719,14 +682,12 @@ function TechTerminalContent() {
                       : "border-amber-500/45 shadow-amber-950/20"
                   }`}
                 >
-                  {/* Franja superior de acento */}
                   <div
                     className={`absolute top-0 left-0 right-0 h-1 ${
                       isUrgent ? "bg-rose-500" : "bg-amber-500"
                     }`}
                   />
 
-                  {/* Encabezado */}
                   <div className="flex items-start justify-between gap-3 pt-1">
                     <div className="flex items-center gap-3">
                       <div
@@ -759,7 +720,7 @@ function TechTerminalContent() {
                     </span>
                   </div>
 
-                  {/* BLOQUE CENTRAL: EQUIPO Y DURACIÓN */}
+                  {/* BLOQUE CENTRAL */}
                   <div className="bg-slate-950/60 p-4 rounded-2xl border border-white/[0.06] space-y-3">
                     <div>
                       <span className="text-xs font-medium text-slate-400 block">
@@ -785,7 +746,6 @@ function TechTerminalContent() {
                     </div>
                   </div>
 
-                  {/* NOTAS TÉCNICAS Y PRESUPUESTO */}
                   {(currentStop.tags ||
                     (currentStop.cashToCollectEur &&
                       currentStop.cashToCollectEur > 0)) && (
@@ -825,7 +785,6 @@ function TechTerminalContent() {
                     </div>
                   </div>
 
-                  {/* LLAMADA DIRECTA */}
                   {currentStop.phone && (
                     <a
                       href={`tel:${currentStop.phone}`}
@@ -836,7 +795,6 @@ function TechTerminalContent() {
                     </a>
                   )}
 
-                  {/* NAVEGACIÓN Y COPIAR GPS */}
                   <div className="flex items-stretch gap-3">
                     <button
                       type="button"
@@ -875,7 +833,6 @@ function TechTerminalContent() {
                     </button>
                   </div>
 
-                  {/* BOTÓN PRINCIPAL: PARTE FINALIZADO */}
                   <button
                     type="button"
                     onClick={() => openCloseModal(currentStop)}
@@ -888,7 +845,6 @@ function TechTerminalContent() {
               );
             })()}
 
-            {/* SIGUIENTES AVISOS EN COLA */}
             {upcomingStops.length > 0 && (
               <div className="space-y-3 pt-2">
                 <div className="flex items-center justify-between text-xs px-1">
@@ -952,7 +908,8 @@ function TechTerminalContent() {
                             <span className="font-mono font-bold text-amber-400 text-xs block">
                               {stop.estimatedMinutes}m
                             </span>
-                            {stop.cashToCollectEur && stop.cashToCollectEur > 0 ? (
+                            {stop.cashToCollectEur &&
+                            stop.cashToCollectEur > 0 ? (
                               <span className="text-xs text-emerald-400 font-mono font-semibold">
                                 {stop.cashToCollectEur} €
                               </span>
@@ -1035,22 +992,13 @@ function TechTerminalContent() {
               </label>
               <input
                 type="text"
-                maxLength={60}
+                maxLength={120}
                 placeholder="Ej. Cambiado sensor NTC, equipo probado OK..."
                 value={resolutionNoteInput}
                 onChange={(e) => setResolutionNoteInput(e.target.value)}
                 className="w-full px-3 py-2.5 rounded-xl bg-slate-950/70 border border-white/[0.08] text-white text-sm outline-none focus:border-amber-500"
               />
             </div>
-
-            {terminalMode === "ephemeral" && (
-              <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-300 flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
-                <span>
-                  Los datos personales del cliente se borrarán del teléfono al confirmar.
-                </span>
-              </div>
-            )}
 
             <div className="flex gap-2.5 pt-1">
               <button
@@ -1062,10 +1010,11 @@ function TechTerminalContent() {
               </button>
               <button
                 type="button"
+                disabled={isSubmittingClose}
                 onClick={handleExecuteCompletion}
-                className="w-2/3 min-h-[50px] rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm shadow-lg shadow-emerald-600/25 transition active:scale-[0.98]"
+                className="w-2/3 min-h-[50px] rounded-2xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-sm shadow-lg shadow-emerald-600/25 transition active:scale-[0.98]"
               >
-                Confirmar Cierre
+                {isSubmittingClose ? "Guardando..." : "Confirmar Cierre"}
               </button>
             </div>
           </div>
@@ -1076,7 +1025,7 @@ function TechTerminalContent() {
       <footer className="text-center text-xs text-slate-500 px-4 pt-3 border-t border-white/[0.06]">
         <span className="flex items-center justify-center gap-1.5 font-medium">
           <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          SATRuta Técnico · Privacidad Local-First & Zero-Cloud
+          SATRuta Técnico · Nube Cifrada UE + Cola Offline
         </span>
       </footer>
     </div>

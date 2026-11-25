@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuthSession } from "@/lib/supabase/server";
 
 interface CoordinateResult {
   lat: number;
@@ -260,6 +261,9 @@ async function readBoundedText(
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireAuthSession(["admin", "tecnico"]);
+    if (!auth.ok) return auth.response;
+
     if (!checkResolveRateLimit(req)) {
       return NextResponse.json(
         {

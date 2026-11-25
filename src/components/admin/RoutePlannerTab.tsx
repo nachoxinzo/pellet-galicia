@@ -26,8 +26,6 @@ import {
   OsrmRouteGeometryResult,
 } from "@/utils/osrmTableService";
 import {
-  encodeTripPayload,
-  buildTripPayloadFromOrders,
   buildGoogleMapsMultiStopUrl,
   extractTechTagsFromNotes,
   decodeReturnReceipt,
@@ -294,15 +292,10 @@ export default function RoutePlannerTab({
     setTrips(updated);
   };
 
-  // Payload ultracompacto v3 para /tecnico?r=... reutilizando el helper único
+  // Ruta limpia sin PII en URL ni QR (el técnico inicia sesión en /tecnico)
   const activeTripEncodedPayload = useMemo(() => {
-    if (!activeTrip || activeTrip.orders.length === 0) return "";
-    const payload = buildTripPayloadFromOrders(activeTrip.orders, config, {
-      tripNum: activeTrip.tripNumber,
-      preserveOrder: true,
-    });
-    return encodeTripPayload(payload);
-  }, [activeTrip, config]);
+    return activeTrip && activeTrip.orders.length > 0 ? "cloud" : "";
+  }, [activeTrip]);
 
   // Cálculo de ETA realista acumulando conducción OSRM + duración real de cada intervención anterior
   const stopEtasMap = useMemo(() => {
@@ -464,8 +457,7 @@ export default function RoutePlannerTab({
   );
 
   const baseUrl = typeof window !== "undefined" ? window.location.origin : "";
-  const effectivePayload = sharePayloadStr || activeTripEncodedPayload;
-  const techTerminalUrl = `${baseUrl}/tecnico?r=${effectivePayload}`;
+  const techTerminalUrl = `${baseUrl}/tecnico`;
   const gmapsMultiStopUrl = activeTrip
     ? buildGoogleMapsMultiStopUrl(
         config.warehouseCoordinates,
@@ -1225,7 +1217,7 @@ export default function RoutePlannerTab({
                 </div>
                 <div>
                   <h3 className="font-black text-base">
-                    Hoja de Ruta Efímera del Técnico
+                    Acceso al Turno del Técnico (Nube Cifrada)
                   </h3>
                   <p className="text-xs text-slate-400">
                     Turno #{activeTrip?.tripNumber || 1} •{" "}
@@ -1295,7 +1287,8 @@ export default function RoutePlannerTab({
             <div className="flex items-start gap-2 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
               <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
               <span>
-                <strong>Zero-Cloud:</strong> Los avisos viajan comprimidos en el enlace y se destruyen del móvil al cerrar cada parte.
+                <strong>Privacidad Cero-Fugas:</strong> Ningún dato de cliente viaja en el enlace ni en el código QR. El técnico ve solo su turno al abrir{" "}
+                <code className="font-mono">/tecnico</code> con su sesión iniciada.
               </span>
             </div>
 

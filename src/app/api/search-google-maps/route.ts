@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuthSession } from "@/lib/supabase/server";
 
 export interface GoogleMapsSearchResult {
   id: string;
@@ -518,6 +519,9 @@ function checkSearchRateLimit(req: NextRequest): boolean {
 
 export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuthSession(["admin", "tecnico"]);
+    if (!auth.ok) return auth.response;
+
     if (!checkSearchRateLimit(req)) {
       return NextResponse.json(
         {

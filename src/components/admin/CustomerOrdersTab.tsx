@@ -8,6 +8,7 @@ import {
   ServiceType,
   OrderPriority,
   TechnicianConfig,
+  UserProfile,
   FIELD_SERVICE_RULES,
 } from "@/types/pelletGalicia";
 import {
@@ -51,15 +52,11 @@ import {
   GoogleSearchResultItem,
 } from "@/utils/galiciaGeocoding";
 import {
-  galiciaStorage,
   normalizeGaliciaText,
   normalizePhoneDigits,
   extractConcelloFromVillage,
 } from "@/services/galiciaStorage";
-import {
-  extractTechTagsFromNotes,
-  buildTechTerminalUrl,
-} from "@/utils/galiciaUrlCodec";
+import { extractTechTagsFromNotes } from "@/utils/galiciaUrlCodec";
 import {
   formatHoursMinutes,
   getServiceTypeBadgeMeta,
@@ -95,14 +92,16 @@ interface CustomerOrdersTabProps {
   customers: Customer[];
   orders: ServiceOrder[];
   config: TechnicianConfig;
+  technicians?: UserProfile[];
   maxWorkdayMinutes: number;
   onSaveCustomer: (
     customer: Omit<Customer, "id" | "createdAt" | "updatedAt"> & { id?: string }
-  ) => Customer | void;
-  onDeleteCustomer: (id: string) => void;
+  ) => Promise<Customer | void> | Customer | void;
+  onDeleteCustomer: (id: string) => Promise<void> | void;
   onSaveOrder: (
     customerId: string,
     payload: {
+      assignedTechId?: string | null;
       serviceType?: ServiceType;
       priority?: OrderPriority;
       equipmentInfo?: string;
@@ -110,10 +109,11 @@ interface CustomerOrdersTabProps {
       estimatedPriceEur?: number;
       technicalNotes?: string;
     }
-  ) => void;
+  ) => Promise<void> | void;
   onUpdateOrder: (
     orderId: string,
     updates: {
+      assignedTechId?: string | null;
       serviceType?: ServiceType;
       priority?: OrderPriority;
       equipmentInfo?: string;
@@ -122,14 +122,17 @@ interface CustomerOrdersTabProps {
       technicalNotes?: string;
       status?: ServiceOrder["status"];
     }
-  ) => void;
+  ) => Promise<void> | void;
   onUpdateOrderDuration: (
     orderId: string,
     deltaOrExact: number,
     isDelta?: boolean
-  ) => void;
-  onDeleteOrder: (id: string) => void;
-  onUpdateOrderStatus: (id: string, status: ServiceOrder["status"]) => void;
+  ) => Promise<void> | void;
+  onDeleteOrder: (id: string) => Promise<void> | void;
+  onUpdateOrderStatus: (
+    id: string,
+    status: ServiceOrder["status"]
+  ) => Promise<void> | void;
   onNavigateToPlanner?: () => void;
 }
 
@@ -137,6 +140,7 @@ export default function CustomerOrdersTab({
   customers,
   orders,
   config,
+  technicians = [],
   maxWorkdayMinutes,
   onSaveCustomer,
   onDeleteCustomer,
@@ -201,6 +205,8 @@ export default function CustomerOrdersTab({
   );
   const [estimatedPriceEur, setEstimatedPriceEur] = useState<string>("");
   const [technicalNotes, setTechnicalNotes] = useState("");
+  const [assignedTechId, setAssignedTechId] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Filtros de la Cola de Avisos
   const [queueStatusFilter, setQueueStatusFilter] = useState<
@@ -540,7 +546,7 @@ export default function CustomerOrdersTab({
     );
   };
 
-  const handleQuickCreateService = (
+  const handleQuickCreateService = async (
     c: Customer,
     typeOverride?: ServiceType,
     minutesOverride?: number
@@ -552,20 +558,24 @@ export default function CustomerOrdersTab({
       c.lastInterventionMinutes ??
       45;
 
-    onSaveOrder(c.id, {
-      serviceType: targetType,
-      priority: targetType === "Avería" ? "Urgente" : "Normal",
-      equipmentInfo: c.equipmentInfo,
-      estimatedMinutes: targetMinutes,
-      technicalNotes: c.internalNotes || "",
-    });
-    setShowCustomerDropdown(false);
+    try {
+      await onSaveOrder(c.id, {
+        serviceType: targetType,
+        priority: targetType === "Avería" ? "Urgente" : "Normal",
+        equipmentInfo: c.equipmentInfo,
+        estimatedMinutes: targetMinutes,
+        technicalNotes: c.internalNotes || "",
+      });
+      setShowCustomerDropdown(false);
 
-    const feedbackText = `Parte guardado: ${targetType} para ${c.name} (${targetMinutes} min)`;
-    setQuickOrderFeedback(feedbackText);
-    setTimeout(() => {
-      setQuickOrderFeedback((prev) => (prev === feedbackText ? null : prev));
-    }, 9000);
+      const feedbackText = `Parte guardado en la nube: ${targetType} para ${c.name} (${targetMinutes} min)`;
+      setQuickOrderFeedback(feedbackText);
+      setTimeout(() => {
+        setQuickOrderFeedback((prev) => (prev === feedbackText ? null : prev));
+      }, 9000);
+    } catch {
+      // Error ya notificado por el dashboard
+    }
   };
 
   const handleMapClick = async (coords: { lat: number; lng: number }) => {
@@ -605,6 +615,7 @@ export default function CustomerOrdersTab({
     setEstimatedMinutes(FIELD_SERVICE_RULES.DEFAULT_INTERVENTION_MINUTES);
     setEstimatedPriceEur("");
     setTechnicalNotes("");
+    setAssignedTechId(null);
     setGoogleQuery("");
     setGoogleResults([]);
     setHasSearchedOnce(false);
@@ -635,6 +646,7 @@ export default function CustomerOrdersTab({
         : ""
     );
     setTechnicalNotes(ord.technicalNotes || "");
+    setAssignedTechId(ord.assignedTechId || null);
     setGoogleQuery("");
     setShowGoogleDropdown(false);
     setShowCustomerDropdown(false);
@@ -659,53 +671,41 @@ export default function CustomerOrdersTab({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !village.trim()) return;
+    if (!name.trim() || !village.trim() || isSubmitting) return;
 
-    const effectiveCustomerId =
-      selectedCustomerId || detectedExistingCustomer?.id || undefined;
-    const combinedNotes = technicalNotes.trim() || internalNotes.trim();
-    const parsedPrice = Math.max(
-      0,
-      parseFloat(estimatedPriceEur.replace(",", ".")) || 0
-    );
+    setIsSubmitting(true);
+    try {
+      const effectiveCustomerId =
+        selectedCustomerId || detectedExistingCustomer?.id || undefined;
+      const combinedNotes = technicalNotes.trim() || internalNotes.trim();
+      const parsedPrice = Math.max(
+        0,
+        parseFloat(estimatedPriceEur.replace(",", ".")) || 0
+      );
 
-    const savedCustomer = onSaveCustomer({
-      id: effectiveCustomerId,
-      name,
-      village,
-      phone,
-      equipmentInfo,
-      coordinates: {
-        lat: parseFloat(lat) || config.warehouseCoordinates.lat,
-        lng: parseFloat(lng) || config.warehouseCoordinates.lng,
-      },
-      internalNotes: combinedNotes,
-      lastServiceType: serviceType,
-      lastInterventionMinutes: estimatedMinutes,
-    });
-
-    const targetCustId = effectiveCustomerId || (savedCustomer as any)?.id;
-
-    if (editingOrderId) {
-      onUpdateOrder(editingOrderId, {
-        serviceType,
-        priority: orderPriority,
+      const savedCustomer = await onSaveCustomer({
+        id: effectiveCustomerId,
+        name,
+        village,
+        phone,
         equipmentInfo,
-        estimatedMinutes,
-        estimatedPriceEur: parsedPrice,
-        technicalNotes: combinedNotes,
+        coordinates: {
+          lat: parseFloat(lat) || config.warehouseCoordinates.lat,
+          lng: parseFloat(lng) || config.warehouseCoordinates.lng,
+        },
+        internalNotes: combinedNotes,
+        lastServiceType: serviceType,
+        lastInterventionMinutes: estimatedMinutes,
       });
-      const msg = `Cambios guardados: ${serviceType} para ${name} (${estimatedMinutes} min)`;
-      setQuickOrderFeedback(msg);
-      setTimeout(() => {
-        setQuickOrderFeedback((prev) => (prev === msg ? null : prev));
-      }, 9000);
-      resetForm();
-    } else {
-      if (targetCustId) {
-        onSaveOrder(targetCustId, {
+
+      const targetCustId =
+        effectiveCustomerId || (savedCustomer as Customer | undefined)?.id;
+
+      if (editingOrderId) {
+        await onUpdateOrder(editingOrderId, {
+          assignedTechId,
           serviceType,
           priority: orderPriority,
           equipmentInfo,
@@ -713,21 +713,38 @@ export default function CustomerOrdersTab({
           estimatedPriceEur: parsedPrice,
           technicalNotes: combinedNotes,
         });
-        const msg = `Parte guardado: ${serviceType} para ${name} (${estimatedMinutes} min)`;
+        const msg = `Cambios guardados en la nube: ${serviceType} para ${name} (${estimatedMinutes} min)`;
         setQuickOrderFeedback(msg);
         setTimeout(() => {
           setQuickOrderFeedback((prev) => (prev === msg ? null : prev));
         }, 9000);
+        resetForm();
+      } else if (targetCustId) {
+        await onSaveOrder(targetCustId, {
+          assignedTechId,
+          serviceType,
+          priority: orderPriority,
+          equipmentInfo,
+          estimatedMinutes,
+          estimatedPriceEur: parsedPrice,
+          technicalNotes: combinedNotes,
+        });
+        const msg = `Parte guardado en la nube: ${serviceType} para ${name} (${estimatedMinutes} min)`;
+        setQuickOrderFeedback(msg);
+        setTimeout(() => {
+          setQuickOrderFeedback((prev) => (prev === msg ? null : prev));
+        }, 9000);
+        resetForm();
       }
-      resetForm();
+    } catch {
+      // Error ya mostrado en el dashboard
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleOpenInTechPanel = () => {
-    const latestPending = galiciaStorage.getPendingOrders();
-    const latestCfg = galiciaStorage.getConfig();
-    const url = buildTechTerminalUrl(latestPending, latestCfg);
-    window.open(url, "_blank");
+    window.open("/tecnico", "_blank");
   };
 
   const pendingOrders = orders.filter(
@@ -1311,6 +1328,26 @@ export default function CustomerOrdersTab({
                   />
                 </div>
               </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Técnico asignado (opcional)
+                </label>
+                <select
+                  value={assignedTechId || ""}
+                  onChange={(e) => setAssignedTechId(e.target.value || null)}
+                  className="w-full h-11 px-3.5 text-sm bg-slate-950/60 border border-white/[0.08] rounded-xl text-slate-200 outline-none focus:border-amber-500"
+                >
+                  <option value="">
+                    Cualquier técnico disponible (compartido)
+                  </option>
+                  {technicians.map((tech) => (
+                    <option key={tech.id} value={tech.id}>
+                      {tech.fullName || tech.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {/* PASO 2: UBICACIÓN INTELIGENTE + MAPA COLAPSABLE */}
@@ -1648,22 +1685,28 @@ export default function CustomerOrdersTab({
                 </button>
                 <button
                   type="submit"
-                  className="w-2/3 h-12 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
+                  disabled={isSubmitting}
+                  className="w-2/3 h-12 rounded-2xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
                 >
                   <Save className="w-4 h-4" />
                   <span>
-                    Guardar Cambios ({serviceType} · {estimatedMinutes} min)
+                    {isSubmitting
+                      ? "Guardando..."
+                      : `Guardar Cambios (${serviceType} · ${estimatedMinutes} min)`}
                   </span>
                 </button>
               </div>
             ) : (
               <button
                 type="submit"
-                className="w-full h-12 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
+                disabled={isSubmitting}
+                className="w-full h-12 rounded-2xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-sm transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
               >
                 <Plus className="w-5 h-5" />
                 <span>
-                  Registrar Parte ({serviceType} · {estimatedMinutes} min)
+                  {isSubmitting
+                    ? "Guardando en nube..."
+                    : `Registrar Parte (${serviceType} · ${estimatedMinutes} min)`}
                 </span>
               </button>
             )}
@@ -1849,6 +1892,11 @@ export default function CustomerOrdersTab({
                           {isCompleted && (
                             <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
                               Cerrado
+                            </span>
+                          )}
+                          {ord.assignedTechName && (
+                            <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-amber-300 border border-white/[0.07]">
+                              {ord.assignedTechName}
                             </span>
                           )}
                         </div>

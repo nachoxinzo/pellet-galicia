@@ -1,6 +1,6 @@
 /**
  * Reglas de negocio y constantes de SATRuta (Asistencia Técnica en Campo: Averías, Revisiones e Instalaciones)
- * Arquitectura Local-First & Zero-Cloud.
+ * Arquitectura Cloud Cifrada UE (Supabase + AES-256-GCM + RLS).
  */
 export const FIELD_SERVICE_RULES = {
   DEFAULT_MAX_WORKDAY_MINUTES: 480, // 8 horas de jornada (conducción + intervenciones)
@@ -20,6 +20,47 @@ export interface Coordinates {
 export type ServiceType = "Avería" | "Revisión" | "Instalación";
 export type OrderPriority = "Urgente" | "Normal";
 export type ServiceStatus = "Pendiente" | "En Ruta" | "Completado" | "Cancelado";
+export type UserRole = "admin" | "tecnico";
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  fullName: string;
+  role: UserRole;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface StorageQuotaStats {
+  used_bytes: number;
+  limit_bytes: number;
+  warn_ratio: number;
+  usage_ratio: number;
+  is_warning: boolean;
+  is_blocked: boolean;
+  audit_retention_days: number;
+  max_audit_rows: number;
+  counts: {
+    customers: number;
+    orders: number;
+    active_orders: number;
+    audit_logs: number;
+    profiles: number;
+  };
+}
+
+export interface AuditLogEntry {
+  id: number;
+  actor_id: string | null;
+  actor_email: string;
+  actor_role: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
 
 /**
  * Cliente / Ubicación / Instalación guardado en la base de datos local (Local-First).
@@ -48,6 +89,8 @@ export interface ServiceOrder {
   id: string;
   customerId: string;
   customer: Customer;
+  assignedTechId?: string | null;
+  assignedTechName?: string;
   serviceType: ServiceType;
   priority: OrderPriority;
   equipmentInfo?: string; // Equipo o instalación específica del aviso
@@ -75,6 +118,7 @@ export interface TechnicianConfig {
   warehouseVillage: string;
   warehouseCoordinates: Coordinates;
   googleMapsApiKey?: string;
+  hasGoogleMapsApiKey?: boolean;
   consumoL100: number; // L/100km vehículo taller
   precioCombustible: number; // €/L
   hourlyCostEur?: number; // Coste interno por hora (opcional)

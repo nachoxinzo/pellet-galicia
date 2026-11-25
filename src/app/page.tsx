@@ -5,15 +5,16 @@ import {
   ArrowRight,
   Database,
   ClipboardCheck,
+  Lock,
 } from "lucide-react";
 
 export default function HomePage() {
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col justify-between p-4 sm:p-8">
       {/* Header */}
-      <header className="max-w-5xl mx-auto w-full flex items-center justify-between py-4 border-b border-slate-900">
+      <header className="max-w-5xl mx-auto w-full flex items-center justify-between py-4 border-b border-white/[0.08]">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-amber-500 text-slate-950 font-black flex items-center justify-center shadow-lg shadow-amber-500/20">
+          <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 font-black flex items-center justify-center shadow-lg shadow-amber-500/20">
             <Wrench className="w-5 h-5" />
           </div>
           <div>
@@ -25,9 +26,9 @@ export default function HomePage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-bold border border-emerald-500/20">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-bold border border-emerald-500/25">
             <ShieldCheck className="w-3.5 h-3.5" />
-            Local-First & Zero-Cloud
+            Nube Cifrada UE · AES-256
           </span>
         </div>
       </header>
@@ -40,7 +41,7 @@ export default function HomePage() {
             <span className="text-amber-400">Averías y Revisiones</span> en Campo
           </h2>
           <p className="text-sm sm:text-base text-slate-400 leading-relaxed">
-            Plataforma local y privada para equipos técnicos. Optimiza jornadas por carretera real (OSRM), ubica fincas y naves con satélite híbrido y envía partes efímeros al móvil del técnico sin huella en la nube.
+            Sincronización multidispositivo en la nube europea con acceso restringido por roles, cifrado de datos personales y soporte offline en aldeas sin cobertura.
           </p>
         </div>
 
@@ -49,7 +50,7 @@ export default function HomePage() {
           {/* Admin / Despacho SAT */}
           <Link
             href="/admin"
-            className="group block p-7 rounded-3xl bg-slate-900 border-2 border-slate-800 hover:border-amber-500 transition-all duration-200 shadow-xl hover:shadow-2xl hover:shadow-amber-500/10 relative overflow-hidden"
+            className="group block p-7 rounded-3xl bg-slate-900/70 backdrop-blur-md border border-white/[0.08] hover:border-amber-500/60 transition-all duration-200 shadow-xl hover:shadow-2xl hover:shadow-amber-500/10 relative overflow-hidden"
           >
             <div className="space-y-4">
               <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center justify-center group-hover:scale-110 transition duration-200">
@@ -65,17 +66,17 @@ export default function HomePage() {
                 </h3>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Gestión de clientes, equipos e instalaciones, partes de avería/revisión, cálculo de jornada laboral (horas/min), rutas OSRM por carretera con prioridad de urgencias y envío por QR o WhatsApp.
+                Cartera de clientes cifrada en la nube, gestión de averías/revisiones, cálculo de jornada laboral, rutas OSRM por carretera, control de usuarios y cuota de 50 MB.
               </p>
-              <div className="pt-2 flex flex-wrap gap-2 text-[10px] font-bold text-slate-400">
-                <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700">
-                  💾 Base Local
+              <div className="pt-2 flex flex-wrap gap-2 text-[10px] font-bold text-slate-300">
+                <span className="px-2.5 py-1 rounded-full bg-slate-800/80 border border-white/[0.08]">
+                  Solo Admins
                 </span>
-                <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700">
-                  🛰️ Satélite Híbrido
+                <span className="px-2.5 py-1 rounded-full bg-slate-800/80 border border-white/[0.08]">
+                  Satélite Híbrido
                 </span>
-                <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700">
-                  ⚡ OSRM + Jornada
+                <span className="px-2.5 py-1 rounded-full bg-slate-800/80 border border-white/[0.08]">
+                  OSRM + Jornada
                 </span>
               </div>
             </div>
@@ -84,7 +85,7 @@ export default function HomePage() {
           {/* Técnico en Campo */}
           <Link
             href="/tecnico"
-            className="group block p-7 rounded-3xl bg-slate-900 border-2 border-slate-800 hover:border-sky-500 transition-all duration-200 shadow-xl hover:shadow-2xl hover:shadow-sky-500/10 relative overflow-hidden"
+            className="group block p-7 rounded-3xl bg-slate-900/70 backdrop-blur-md border border-white/[0.08] hover:border-sky-500/60 transition-all duration-200 shadow-xl hover:shadow-2xl hover:shadow-sky-500/10 relative overflow-hidden"
           >
             <div className="space-y-4">
               <div className="w-12 h-12 rounded-2xl bg-sky-500/10 text-sky-400 border border-sky-500/20 flex items-center justify-center group-hover:scale-110 transition duration-200">
@@ -100,17 +101,17 @@ export default function HomePage() {
                 </h3>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Terminal móvil para el técnico en ruta. Carga el turno mediante QR/WhatsApp, navega con Google Maps, registra tiempos reales e importe cobrado y destruye los datos del cliente al cerrar cada parte.
+                Sincronización automática de avisos activos asignados al turno, navegación GPS directa, registro de tiempos y cobros con cola offline automática sin cobertura.
               </p>
-              <div className="pt-2 flex flex-wrap gap-2 text-[10px] font-bold text-slate-400">
-                <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700">
-                  📲 Cero Rastro en Historial
+              <div className="pt-2 flex flex-wrap gap-2 text-[10px] font-bold text-slate-300">
+                <span className="px-2.5 py-1 rounded-full bg-slate-800/80 border border-white/[0.08]">
+                  Solo Turno Activo
                 </span>
-                <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700">
-                  🔧 Partes y Cobros
+                <span className="px-2.5 py-1 rounded-full bg-slate-800/80 border border-white/[0.08]">
+                  Offline Seguro
                 </span>
-                <span className="px-2.5 py-1 rounded-full bg-slate-800 border border-slate-700">
-                  📤 Cierre SAT1-
+                <span className="px-2.5 py-1 rounded-full bg-slate-800/80 border border-white/[0.08]">
+                  Cierre Instantáneo
                 </span>
               </div>
             </div>
@@ -118,12 +119,14 @@ export default function HomePage() {
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="max-w-5xl mx-auto w-full text-center text-xs text-slate-600 py-4 border-t border-slate-900 flex flex-col sm:flex-row items-center justify-between gap-2">
-        <span>SATRuta &bull; Logística de Averías, Revisiones e Instalaciones</span>
-        <span className="text-slate-500">
-          Privacidad estricta: Local-First & Zero-Cloud
+      <footer className="max-w-5xl mx-auto w-full py-4 border-t border-white/[0.06] flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+        <span className="flex items-center gap-1.5">
+          <Lock className="w-3.5 h-3.5 text-emerald-500" />
+          Acceso autenticado en la UE (Supabase Irlanda · RLS + AES-256-GCM)
         </span>
+        <Link href="/login" className="text-amber-400 hover:underline font-semibold">
+          Cambiar de cuenta
+        </Link>
       </footer>
     </div>
   );
