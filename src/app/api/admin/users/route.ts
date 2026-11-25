@@ -8,11 +8,24 @@ import {
 } from "@/lib/supabase/server";
 
 const createUserSchema = z.object({
+  mode: z.literal("create"),
   email: z.string().trim().email("Email inválido"),
   fullName: z.string().trim().min(2, "Nombre requerido").max(120),
   password: z.string().min(8, "Contraseña mínima de 8 caracteres").max(128),
   role: z.enum(["admin", "tecnico"]),
 });
+
+const inviteUserSchema = z.object({
+  mode: z.literal("invite"),
+  email: z.string().trim().email("Email inválido"),
+  fullName: z.string().trim().min(2, "Nombre requerido").max(120),
+  role: z.enum(["admin", "tecnico"]),
+});
+
+const postUserSchema = z.discriminatedUnion("mode", [
+  createUserSchema,
+  inviteUserSchema,
+]);
 
 export async function GET() {
   const auth = await requireAuthSession(["admin"]);
@@ -53,21 +66,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "Falta configurar SUPABASE_SERVICE_ROLE_KEY en el servidor (Vercel/.env.local) para crear cuentas desde /admin. Mientras tanto puedes invitar al usuario desde el panel de Supabase Authentication -> Users.",
+          "Falta configurar SUPABASE_SERVICE_ROLE_KEY en el servidor (Vercel/.env.local) para crear o invitar cuentas desde /admin.",
         code: "MISSING_SERVICE_ROLE",
       },
       { status: 503 }
     );
   }
 
-  let rawBody: unknown;
+  let rawBody: Record<string, unknown>;
   try {
-    rawBody = await req.json();
+    rawBody = (await req.json()) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
   }
 
-  const parsed = createUserSchema.safeParse(rawBody);
+  const normalizedBody = {
+    ...rawBody,
+    mode: rawBody?.mode === "invite" ? "invite" : "create",
+  };
+
+  const parsed = postUserSchema.safeParse(normalizedBody);
   if (!parsed.success) {
     return NextResponse.json(
       { error: parsed.error.issues[0]?.message || "Datos inválidos" },
@@ -75,16 +93,77 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { email, fullName, password, role } = parsed.data;
+  const payload = parsed.data;
+  const now = new Date().toISOString();
 
-  // Verificar cupo máximo operativo sugerido (sin bloquear, solo informativo, aunque respetamos 3 admins + 2 técnicos si se quiere controlar)
+  if (payload.mode === "invite") {
+    const siteOrigin =
+      process.env.NEXT_PUBLIC_SITE_URL?.trim().replace(/\/$/, "") ||
+      req.nextUrl.origin;
+
+    const { data: invited, error: inviteErr } =
+      await adminClient.auth.admin.inviteUserByEmail(payload.email, {
+        data: { full_name: payload.fullName },
+        redirectTo: `${siteOrigin}/auth/set-password`,
+      });
+
+    if (inviteErr || !invited.user) {
+      return NextResponse.json(
+        {
+          error:
+            inviteErr?.message ||
+            "No se pudo enviar la invitación desde Supabase Auth.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // Fijar el rol en app_metadata y en public.profiles
+    await adminClient.auth.admin.updateUserById(invited.user.id, {
+      app_metadata: { role: payload.role },
+    });
+
+    await adminClient.from("profiles").upsert({
+      id: invited.user.id,
+      email: payload.email,
+      full_name: payload.fullName,
+      role: payload.role,
+      is_active: true,
+      updated_at: now,
+    });
+
+    await logAuditEvent(
+      auth.supabase,
+      auth.profile,
+      "user.invite",
+      "profile",
+      invited.user.id,
+      { role: payload.role }
+    );
+
+    return NextResponse.json(
+      {
+        user: {
+          id: invited.user.id,
+          email: payload.email,
+          fullName: payload.fullName,
+          role: payload.role,
+          isActive: true,
+        },
+        invited: true,
+      },
+      { status: 201 }
+    );
+  }
+
+  // Modo creación directa con contraseña temporal
   const { data: created, error: createErr } =
     await adminClient.auth.admin.createUser({
-      email,
-      password,
+      email: payload.email,
+      password: payload.password,
       email_confirm: true,
-      user_metadata: { full_name: fullName },
-      app_metadata: { role },
+      user_metadata: { full_name: payload.fullName },
+      app_metadata: { role: payload.role },
     });
 
   if (createErr || !created.user) {
@@ -97,17 +176,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Asegurar que el perfil tiene el nombre completo y rol exacto
-  await adminClient
-    .from("profiles")
-    .upsert({
-      id: created.user.id,
-      email,
-      full_name: fullName,
-      role,
-      is_active: true,
-      updated_at: new Date().toISOString(),
-    });
+  await adminClient.from("profiles").upsert({
+    id: created.user.id,
+    email: payload.email,
+    full_name: payload.fullName,
+    role: payload.role,
+    is_active: true,
+    updated_at: now,
+  });
 
   await logAuditEvent(
     auth.supabase,
@@ -115,18 +191,19 @@ export async function POST(req: NextRequest) {
     "user.create",
     "profile",
     created.user.id,
-    { role }
+    { role: payload.role }
   );
 
   return NextResponse.json(
     {
       user: {
         id: created.user.id,
-        email,
-        fullName,
-        role,
+        email: payload.email,
+        fullName: payload.fullName,
+        role: payload.role,
         isActive: true,
       },
+      invited: false,
     },
     { status: 201 }
   );

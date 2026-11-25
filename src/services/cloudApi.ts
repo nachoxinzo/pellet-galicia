@@ -219,7 +219,19 @@ export const cloudApi = {
   }): Promise<UserProfile> {
     const res = await requestJson<{ user: UserProfile }>("/api/admin/users", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ mode: "create", ...payload }),
+    });
+    return res.user;
+  },
+
+  async inviteUser(payload: {
+    email: string;
+    fullName: string;
+    role: UserRole;
+  }): Promise<UserProfile> {
+    const res = await requestJson<{ user: UserProfile }>("/api/admin/users", {
+      method: "POST",
+      body: JSON.stringify({ mode: "invite", ...payload }),
     });
     return res.user;
   },
