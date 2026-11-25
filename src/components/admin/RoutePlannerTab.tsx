@@ -27,6 +27,7 @@ import {
 } from "@/utils/osrmTableService";
 import {
   encodeTripPayload,
+  buildTripPayloadFromOrders,
   buildGoogleMapsMultiStopUrl,
   extractTechTagsFromNotes,
   decodeReturnReceipt,
@@ -293,45 +294,15 @@ export default function RoutePlannerTab({
     setTrips(updated);
   };
 
-  // Payload ultracompacto v3 para /tecnico?r=...
+  // Payload ultracompacto v3 para /tecnico?r=... reutilizando el helper único
   const activeTripEncodedPayload = useMemo(() => {
     if (!activeTrip || activeTrip.orders.length === 0) return "";
-    const ephemeralStops: EphemeralStop[] = activeTrip.orders.map((ord, i) => {
-      const { cashToCollectEur, tags } = extractTechTagsFromNotes(
-        ord.technicalNotes || ord.customer.internalNotes,
-        ord.estimatedPriceEur
-      );
-      return {
-        seq: i + 1,
-        id: `eph-${ord.id}`,
-        name: ord.customer.name,
-        village: ord.customer.village,
-        lat: ord.customer.coordinates.lat,
-        lng: ord.customer.coordinates.lng,
-        serviceType: ord.serviceType,
-        priority: ord.priority,
-        estimatedMinutes: ord.estimatedMinutes,
-        equipmentInfo: ord.equipmentInfo || ord.customer.equipmentInfo,
-        cashToCollectEur,
-        tags,
-        phone: ord.customer.phone || undefined,
-      };
-    });
-
-    const payload: EphemeralTripPayload = {
-      v: "3.0",
+    const payload = buildTripPayloadFromOrders(activeTrip.orders, config, {
       tripNum: activeTrip.tripNumber,
-      date: new Date().toISOString().split("T")[0],
-      warehouse: {
-        name: config.warehouseName,
-        lat: config.warehouseCoordinates.lat,
-        lng: config.warehouseCoordinates.lng,
-      },
-      stops: ephemeralStops,
-    };
-
+      preserveOrder: true,
+    });
     return encodeTripPayload(payload);
-  }, [activeTrip, config.warehouseName, config.warehouseCoordinates]);
+  }, [activeTrip, config]);
 
   // Cálculo de ETA realista acumulando conducción OSRM + duración real de cada intervención anterior
   const stopEtasMap = useMemo(() => {

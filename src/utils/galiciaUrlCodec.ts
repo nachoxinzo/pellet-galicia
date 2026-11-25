@@ -2,6 +2,8 @@ import LZString from "lz-string";
 import {
   EphemeralTripPayload,
   EphemeralStop,
+  ServiceOrder,
+  TechnicianConfig,
   ServiceType,
   UltraCompactStopWireV3,
   UltraCompactTripWireV3,
@@ -91,6 +93,86 @@ export function extractTechTagsFromNotes(
     cashToCollectEur,
     tags: combinedTags,
   };
+}
+
+/**
+ * Construye un EphemeralTripPayload directamente a partir de una lista de ServiceOrder.
+ * Si preserveOrder=false, ordena automáticamente Urgentes primero y luego por estado/creación.
+ */
+export function buildTripPayloadFromOrders(
+  orders: ServiceOrder[],
+  config: TechnicianConfig,
+  options?: { tripNum?: number; preserveOrder?: boolean }
+): EphemeralTripPayload {
+  const ordered = options?.preserveOrder
+    ? [...orders]
+    : [...orders].sort((a, b) => {
+        if (a.priority === "Urgente" && b.priority !== "Urgente") return -1;
+        if (b.priority === "Urgente" && a.priority !== "Urgente") return 1;
+        if (a.status === "En Ruta" && b.status !== "En Ruta") return -1;
+        if (b.status === "En Ruta" && a.status !== "En Ruta") return 1;
+        return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      });
+
+  const ephemeralStops: EphemeralStop[] = ordered
+    .slice(0, MAX_STOPS_PER_TRIP)
+    .map((ord, i) => {
+      const { cashToCollectEur, tags } = extractTechTagsFromNotes(
+        ord.technicalNotes || ord.customer.internalNotes,
+        ord.estimatedPriceEur
+      );
+      return {
+        seq: i + 1,
+        id: `eph-${ord.id}`,
+        name: ord.customer.name,
+        village: ord.customer.village,
+        lat: ord.customer.coordinates.lat,
+        lng: ord.customer.coordinates.lng,
+        serviceType: ord.serviceType,
+        priority: ord.priority,
+        estimatedMinutes: ord.estimatedMinutes,
+        equipmentInfo: ord.equipmentInfo || ord.customer.equipmentInfo,
+        cashToCollectEur,
+        tags,
+        phone: ord.customer.phone || undefined,
+      };
+    });
+
+  return {
+    v: "3.0",
+    tripNum: options?.tripNum ?? 1,
+    date: new Date().toISOString().split("T")[0],
+    warehouse: {
+      name: config.warehouseName,
+      lat: config.warehouseCoordinates.lat,
+      lng: config.warehouseCoordinates.lng,
+    },
+    stops: ephemeralStops,
+  };
+}
+
+/**
+ * Genera una URL completa hacia /tecnico?r=... lista para abrir o compartir.
+ */
+export function buildTechTerminalUrl(
+  orders: ServiceOrder[],
+  config: TechnicianConfig,
+  baseUrl?: string
+): string {
+  const origin =
+    baseUrl ?? (typeof window !== "undefined" ? window.location.origin : "");
+  if (orders.length === 0) return `${origin}/tecnico`;
+
+  const payload = buildTripPayloadFromOrders(orders, config);
+  let encoded = encodeTripPayload(payload);
+
+  // Recortar paradas si la URL excediera el máximo seguro
+  if (encoded.length > MAX_ENCODED_URL_LENGTH - 120) {
+    const trimmedStops = payload.stops.slice(0, 15);
+    encoded = encodeTripPayload({ ...payload, stops: trimmedStops });
+  }
+
+  return `${origin}/tecnico?r=${encoded}`;
 }
 
 // Alias de compatibilidad

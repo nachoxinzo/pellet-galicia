@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import {
   Customer,
   ServiceOrder,
   ServiceType,
   OrderPriority,
+  TechnicianConfig,
   FIELD_SERVICE_RULES,
 } from "@/types/pelletGalicia";
 import {
@@ -18,7 +19,6 @@ import {
   Trash2,
   CheckCircle2,
   Satellite,
-  Crosshair,
   Loader2,
   ClipboardPaste,
   AlertTriangle,
@@ -36,11 +36,18 @@ import {
   RotateCcw,
   Flame,
   Cog,
+  LocateFixed,
+  Building2,
+  Home,
+  ExternalLink,
+  Route as RouteIcon,
 } from "lucide-react";
 import {
   searchGoogleMapsLive,
   reverseGeocodeGalicia,
   resolveMapLocation,
+  detectDirectLocationInput,
+  extractGaliciaCoordinates,
   GoogleSearchResultItem,
 } from "@/utils/galiciaGeocoding";
 import {
@@ -49,7 +56,10 @@ import {
   normalizePhoneDigits,
   extractConcelloFromVillage,
 } from "@/services/galiciaStorage";
-import { extractTechTagsFromNotes } from "@/utils/galiciaUrlCodec";
+import {
+  extractTechTagsFromNotes,
+  buildTechTerminalUrl,
+} from "@/utils/galiciaUrlCodec";
 import {
   formatHoursMinutes,
   getServiceTypeBadgeMeta,
@@ -74,8 +84,8 @@ const PrecisionMapPicker = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="h-[340px] w-full bg-slate-950 rounded-3xl flex items-center justify-center text-slate-500 text-xs border border-slate-800 animate-pulse">
-        Cargando Google Maps Satélite Híbrido...
+      <div className="h-[260px] w-full bg-slate-950/70 rounded-2xl flex items-center justify-center text-slate-400 text-xs border border-white/[0.06] animate-pulse">
+        Cargando mapa satélite híbrido...
       </div>
     ),
   }
@@ -84,6 +94,7 @@ const PrecisionMapPicker = dynamic(
 interface CustomerOrdersTabProps {
   customers: Customer[];
   orders: ServiceOrder[];
+  config: TechnicianConfig;
   maxWorkdayMinutes: number;
   onSaveCustomer: (
     customer: Omit<Customer, "id" | "createdAt" | "updatedAt"> & { id?: string }
@@ -119,11 +130,13 @@ interface CustomerOrdersTabProps {
   ) => void;
   onDeleteOrder: (id: string) => void;
   onUpdateOrderStatus: (id: string, status: ServiceOrder["status"]) => void;
+  onNavigateToPlanner?: () => void;
 }
 
 export default function CustomerOrdersTab({
   customers,
   orders,
+  config,
   maxWorkdayMinutes,
   onSaveCustomer,
   onDeleteCustomer,
@@ -132,9 +145,10 @@ export default function CustomerOrdersTab({
   onUpdateOrderDuration,
   onDeleteOrder,
   onUpdateOrderStatus,
+  onNavigateToPlanner,
 }: CustomerOrdersTabProps) {
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
-  const formContainerRef = React.useRef<HTMLDivElement>(null);
+  const formContainerRef = useRef<HTMLDivElement>(null);
 
   // Super-Buscador de clientes habituales
   const [customerSearch, setCustomerSearch] = useState("");
@@ -169,9 +183,15 @@ export default function CustomerOrdersTab({
   const [village, setVillage] = useState("");
   const [phone, setPhone] = useState("");
   const [equipmentInfo, setEquipmentInfo] = useState("");
-  const [lat, setLat] = useState("42.2982");
-  const [lng, setLng] = useState("-7.8185");
+  const [lat, setLat] = useState(
+    config.warehouseCoordinates.lat.toFixed(6)
+  );
+  const [lng, setLng] = useState(
+    config.warehouseCoordinates.lng.toFixed(6)
+  );
   const [internalNotes, setInternalNotes] = useState("");
+  const [isLocationPinned, setIsLocationPinned] = useState(false);
+  const [isMapExpanded, setIsMapExpanded] = useState(true);
 
   // Campos del Parte / Aviso SAT
   const [serviceType, setServiceType] = useState<ServiceType>("Avería");
@@ -189,13 +209,15 @@ export default function CustomerOrdersTab({
   const [queueSearchQuery, setQueueSearchQuery] = useState("");
   const [onlyUrgentFilter, setOnlyUrgentFilter] = useState(false);
 
-  // Buscador Google Maps
+  // Buscador Google Maps Inteligente
   const [googleQuery, setGoogleQuery] = useState("");
   const [googleResults, setGoogleResults] = useState<GoogleSearchResultItem[]>(
     []
   );
   const [isSearchingGoogle, setIsSearchingGoogle] = useState(false);
+  const [hasSearchedOnce, setHasSearchedOnce] = useState(false);
   const [showGoogleDropdown, setShowGoogleDropdown] = useState(false);
+  const [isGettingGps, setIsGettingGps] = useState(false);
   const [confirmedStatus, setConfirmedStatus] = useState<string | null>(null);
 
   const matchingCustomers = useMemo(() => {
@@ -298,32 +320,104 @@ export default function CustomerOrdersTab({
     });
   }, [customers, habitualSearch, habitualConcelloFilter, habitualSort]);
 
-  useEffect(() => {
-    if (!googleQuery.trim() || googleQuery.trim().length < 2) {
-      setGoogleResults([]);
-      setIsSearchingGoogle(false);
-      return;
+  // Resolver directo si el usuario pega coordenadas o link en el buscador
+  const handleDirectLocationResolution = async (inputStr: string) => {
+    const kind = detectDirectLocationInput(inputStr);
+    if (kind === "coords") {
+      const coords = extractGaliciaCoordinates(inputStr);
+      if (coords) {
+        setLat(coords.lat.toFixed(6));
+        setLng(coords.lng.toFixed(6));
+        setIsLocationPinned(true);
+        setIsMapExpanded(false);
+        setShowGoogleDropdown(false);
+        setGoogleQuery("");
+        const geo = await reverseGeocodeGalicia(coords.lat, coords.lng);
+        if (geo?.fullAddress && !village.trim()) {
+          setVillage(geo.fullAddress);
+        }
+        setConfirmedStatus(
+          `Coordenadas fijadas: ${coords.lat.toFixed(5)}, ${coords.lng.toFixed(5)}`
+        );
+        return true;
+      }
     }
 
-    setIsSearchingGoogle(true);
-    const timer = setTimeout(async () => {
+    if (kind === "maps_url") {
+      setIsSearchingGoogle(true);
       try {
-        const config = galiciaStorage.getConfig();
-        const results = await searchGoogleMapsLive(
-          googleQuery,
-          config.googleMapsApiKey
-        );
-        setGoogleResults(results);
-        setShowGoogleDropdown(true);
-      } catch (err) {
-        console.error("Error buscando en Google Maps:", err);
+        const resolved = await resolveMapLocation(inputStr);
+        if (resolved) {
+          setLat(resolved.lat.toFixed(6));
+          setLng(resolved.lng.toFixed(6));
+          setIsLocationPinned(true);
+          setIsMapExpanded(false);
+          setShowGoogleDropdown(false);
+          setGoogleQuery("");
+          if (resolved.resolvedAddress && !village.trim()) {
+            setVillage(resolved.resolvedAddress);
+          }
+          setConfirmedStatus(
+            `Ubicación extraída (${resolved.source}): ${resolved.lat.toFixed(
+              5
+            )}, ${resolved.lng.toFixed(5)}`
+          );
+          return true;
+        }
       } finally {
         setIsSearchingGoogle(false);
       }
-    }, 300);
+    }
 
-    return () => clearTimeout(timer);
-  }, [googleQuery]);
+    return false;
+  };
+
+  // Búsqueda en tiempo real con AbortController + bias hacia la Base
+  useEffect(() => {
+    const trimmed = googleQuery.trim();
+    if (!trimmed || trimmed.length < 2) {
+      setGoogleResults([]);
+      setIsSearchingGoogle(false);
+      setHasSearchedOnce(false);
+      return;
+    }
+
+    const kind = detectDirectLocationInput(trimmed);
+    if (kind === "coords" || kind === "maps_url") {
+      handleDirectLocationResolution(trimmed);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsSearchingGoogle(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const results = await searchGoogleMapsLive(
+          trimmed,
+          config.googleMapsApiKey,
+          config.warehouseCoordinates,
+          controller.signal
+        );
+        if (!controller.signal.aborted) {
+          setGoogleResults(results);
+          setHasSearchedOnce(true);
+          setShowGoogleDropdown(true);
+        }
+      } catch (err) {
+        console.error("Error buscando en Google Maps:", err);
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsSearchingGoogle(false);
+        }
+      }
+    }, 320);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [googleQuery, config.googleMapsApiKey, config.warehouseCoordinates]);
 
   const handleSelectGooglePlace = (place: GoogleSearchResultItem) => {
     setVillage(place.fullAddress);
@@ -333,37 +427,93 @@ export default function CustomerOrdersTab({
     setLng(lngStr);
     setShowGoogleDropdown(false);
     setGoogleQuery("");
+    setHasSearchedOnce(false);
+    setIsLocationPinned(true);
 
     if (place.categoryType === "municipality") {
+      setIsMapExpanded(true);
       setConfirmedStatus(
-        `⚠️ Centro del concello fijado (${latStr}, ${lngStr}). Haz clic sobre la casa/nave en el mapa satélite.`
+        `Centro del concello fijado (${latStr}, ${lngStr}). Haz clic en el mapa sobre la casa o nave exacta.`
       );
     } else {
+      setIsMapExpanded(false);
       setConfirmedStatus(
-        `✅ Ubicación localizada (${place.source}): ${latStr}, ${lngStr}`
+        `Ubicación fijada (${place.source}): ${place.title} (${latStr}, ${lngStr})`
       );
     }
   };
 
-  const handlePasteCoordsOrLink = async () => {
-    const pasted = prompt(
-      "Pega un enlace de Google Maps o coordenadas (ej. 42.1912, -7.8012):"
+  const handleUseMyGps = () => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setConfirmedStatus("Tu navegador no soporta geolocalización GPS.");
+      return;
+    }
+    setIsGettingGps(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const latNum = Number(pos.coords.latitude.toFixed(6));
+        const lngNum = Number(pos.coords.longitude.toFixed(6));
+        setLat(latNum.toFixed(6));
+        setLng(lngNum.toFixed(6));
+        setIsLocationPinned(true);
+        setIsMapExpanded(false);
+        try {
+          const geo = await reverseGeocodeGalicia(latNum, lngNum);
+          if (geo?.fullAddress && !village.trim()) {
+            setVillage(geo.fullAddress);
+          }
+        } finally {
+          setIsGettingGps(false);
+          setConfirmedStatus(
+            `Ubicación GPS actual fijada: ${latNum.toFixed(5)}, ${lngNum.toFixed(5)}`
+          );
+        }
+      },
+      () => {
+        setIsGettingGps(false);
+        setConfirmedStatus(
+          "No se pudo obtener el GPS. Comprueba los permisos de ubicación."
+        );
+      },
+      { enableHighAccuracy: true, timeout: 7000 }
     );
-    if (!pasted) return;
+  };
+
+  const handlePasteCoordsOrLink = async () => {
+    let pasted = "";
+    try {
+      if (navigator.clipboard?.readText) {
+        pasted = await navigator.clipboard.readText();
+      }
+    } catch {
+      // Fallback a prompt si el navegador bloquea lectura directa del portapapeles
+    }
+    if (!pasted || detectDirectLocationInput(pasted) === "text") {
+      pasted =
+        prompt(
+          "Pega un enlace de Google Maps o coordenadas (ej. 42.1912, -7.8012):"
+        ) || "";
+    }
+    if (!pasted.trim()) return;
+
     const resolved = await resolveMapLocation(pasted);
     if (resolved) {
       setLat(resolved.lat.toFixed(6));
       setLng(resolved.lng.toFixed(6));
+      setIsLocationPinned(true);
+      setIsMapExpanded(false);
       if (resolved.resolvedAddress && !village.trim()) {
         setVillage(resolved.resolvedAddress);
       }
       setConfirmedStatus(
-        `✅ Coordenadas extraídas (${resolved.source}): ${resolved.lat.toFixed(
-          6
-        )}, ${resolved.lng.toFixed(6)}`
+        `Coordenadas extraídas (${resolved.source}): ${resolved.lat.toFixed(
+          5
+        )}, ${resolved.lng.toFixed(5)}`
       );
     } else {
-      alert("No se pudieron extraer coordenadas válidas del texto pegado.");
+      setConfirmedStatus(
+        "No se pudieron extraer coordenadas válidas del enlace o texto."
+      );
     }
   };
 
@@ -383,10 +533,10 @@ export default function CustomerOrdersTab({
         FIELD_SERVICE_RULES.DEFAULT_INTERVENTION_MINUTES
     );
     setShowCustomerDropdown(false);
+    setIsLocationPinned(true);
+    setIsMapExpanded(false);
     setConfirmedStatus(
-      `✅ Cliente "${c.name}" cargado con su GPS exacto y equipo (${
-        c.equipmentInfo || "General"
-      }).`
+      `Cliente "${c.name}" cargado con su GPS exacto y equipo.`
     );
   };
 
@@ -411,11 +561,11 @@ export default function CustomerOrdersTab({
     });
     setShowCustomerDropdown(false);
 
-    const feedbackText = `⚡ Parte de ${targetType} (${targetMinutes} min) para ${c.name} añadido a la cola`;
+    const feedbackText = `Parte guardado: ${targetType} para ${c.name} (${targetMinutes} min)`;
     setQuickOrderFeedback(feedbackText);
     setTimeout(() => {
       setQuickOrderFeedback((prev) => (prev === feedbackText ? null : prev));
-    }, 4500);
+    }, 9000);
   };
 
   const handleMapClick = async (coords: { lat: number; lng: number }) => {
@@ -423,23 +573,20 @@ export default function CustomerOrdersTab({
     const lngStr = coords.lng.toFixed(6);
     setLat(latStr);
     setLng(lngStr);
+    setIsLocationPinned(true);
 
     try {
       const geo = await reverseGeocodeGalicia(coords.lat, coords.lng);
-      if (geo && geo.fullAddress) {
-        if (!village.trim()) {
-          setVillage(geo.fullAddress);
-        }
-        setConfirmedStatus(
-          `✅ Coordenadas fijadas: ${latStr}, ${lngStr} (${
-            geo.placeName || geo.concello
-          })`
-        );
-      } else {
-        setConfirmedStatus(`✅ Coordenadas fijadas: ${latStr}, ${lngStr}`);
+      if (geo && geo.fullAddress && !village.trim()) {
+        setVillage(geo.fullAddress);
       }
+      setConfirmedStatus(
+        `Coordenadas fijadas: ${latStr}, ${lngStr}${
+          geo?.placeName ? ` (${geo.placeName})` : ""
+        }`
+      );
     } catch {
-      setConfirmedStatus(`✅ Coordenadas fijadas: ${latStr}, ${lngStr}`);
+      setConfirmedStatus(`Coordenadas fijadas: ${latStr}, ${lngStr}`);
     }
   };
 
@@ -450,8 +597,8 @@ export default function CustomerOrdersTab({
     setVillage("");
     setPhone("");
     setEquipmentInfo("");
-    setLat("42.2982");
-    setLng("-7.8185");
+    setLat(config.warehouseCoordinates.lat.toFixed(6));
+    setLng(config.warehouseCoordinates.lng.toFixed(6));
     setInternalNotes("");
     setServiceType("Avería");
     setOrderPriority("Normal");
@@ -460,9 +607,12 @@ export default function CustomerOrdersTab({
     setTechnicalNotes("");
     setGoogleQuery("");
     setGoogleResults([]);
+    setHasSearchedOnce(false);
     setConfirmedStatus(null);
     setEditingOrderId(null);
     setShowCustomerDropdown(false);
+    setIsLocationPinned(false);
+    setIsMapExpanded(true);
   };
 
   const handleStartEdit = (ord: ServiceOrder) => {
@@ -488,8 +638,10 @@ export default function CustomerOrdersTab({
     setGoogleQuery("");
     setShowGoogleDropdown(false);
     setShowCustomerDropdown(false);
+    setIsLocationPinned(true);
+    setIsMapExpanded(false);
     setConfirmedStatus(
-      `✏️ Editando aviso de ${ord.customer.name} (${ord.serviceType} · ${ord.estimatedMinutes} min).`
+      `Editando aviso de ${ord.customer.name} (${ord.serviceType} · ${ord.estimatedMinutes} min).`
     );
 
     setTimeout(() => {
@@ -526,8 +678,8 @@ export default function CustomerOrdersTab({
       phone,
       equipmentInfo,
       coordinates: {
-        lat: parseFloat(lat) || 42.2982,
-        lng: parseFloat(lng) || -7.8185,
+        lat: parseFloat(lat) || config.warehouseCoordinates.lat,
+        lng: parseFloat(lng) || config.warehouseCoordinates.lng,
       },
       internalNotes: combinedNotes,
       lastServiceType: serviceType,
@@ -545,11 +697,11 @@ export default function CustomerOrdersTab({
         estimatedPriceEur: parsedPrice,
         technicalNotes: combinedNotes,
       });
-      const msg = `💾 ¡Cambios guardados para ${name} (${serviceType} · ${estimatedMinutes} min)!`;
+      const msg = `Cambios guardados: ${serviceType} para ${name} (${estimatedMinutes} min)`;
       setQuickOrderFeedback(msg);
       setTimeout(() => {
         setQuickOrderFeedback((prev) => (prev === msg ? null : prev));
-      }, 4500);
+      }, 9000);
       resetForm();
     } else {
       if (targetCustId) {
@@ -561,14 +713,21 @@ export default function CustomerOrdersTab({
           estimatedPriceEur: parsedPrice,
           technicalNotes: combinedNotes,
         });
-        const msg = `✅ Parte de ${serviceType} para ${name} (${estimatedMinutes} min) añadido a la cola`;
+        const msg = `Parte guardado: ${serviceType} para ${name} (${estimatedMinutes} min)`;
         setQuickOrderFeedback(msg);
         setTimeout(() => {
           setQuickOrderFeedback((prev) => (prev === msg ? null : prev));
-        }, 4500);
+        }, 9000);
       }
       resetForm();
     }
+  };
+
+  const handleOpenInTechPanel = () => {
+    const latestPending = galiciaStorage.getPendingOrders();
+    const latestCfg = galiciaStorage.getConfig();
+    const url = buildTechTerminalUrl(latestPending, latestCfg);
+    window.open(url, "_blank");
   };
 
   const pendingOrders = orders.filter(
@@ -626,128 +785,177 @@ export default function CustomerOrdersTab({
 
   return (
     <div className="space-y-6">
+      {/* BANNER POST-GUARDADO CON CTAs DIRECTOS AL TÉCNICO Y PLANIFICADOR */}
       {quickOrderFeedback && (
-        <div className="p-4 rounded-2xl bg-emerald-500/20 border-2 border-emerald-500/70 text-emerald-300 font-black text-xs sm:text-sm flex items-center justify-between shadow-xl shadow-emerald-950/50 animate-in fade-in duration-200">
-          <div className="flex items-center gap-2.5">
+        <div className="p-4 rounded-2xl bg-emerald-500/12 border border-emerald-500/35 text-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-center gap-2.5 text-sm font-semibold">
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
             <span>{quickOrderFeedback}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => setQuickOrderFeedback(null)}
-            className="text-emerald-300 hover:text-white px-2 py-0.5 rounded-lg text-xs font-bold"
-          >
-            ✕
-          </button>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleOpenInTechPanel}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Abrir en Panel Técnico</span>
+            </button>
+            {onNavigateToPlanner && (
+              <button
+                type="button"
+                onClick={onNavigateToPlanner}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white border border-white/[0.1] font-semibold text-xs transition"
+              >
+                <RouteIcon className="w-3.5 h-3.5 text-amber-400" />
+                <span>Planificar Ruta</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setQuickOrderFeedback(null)}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white"
+              aria-label="Cerrar aviso"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       )}
 
-      {/* CAJÓN DESPLEGABLE: CARTERA DE CLIENTES E INSTALACIONES */}
-      <div className="bg-slate-900 border border-slate-800 rounded-3xl shadow-xl overflow-hidden">
-        <div className="p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3 bg-gradient-to-r from-slate-900 via-slate-900 to-amber-950/20">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
-              <Users className="w-5 h-5" />
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* COLUMNA IZQUIERDA: FORMULARIO EN 3 PASOS LIMPIOS */}
+        <div
+          ref={formContainerRef}
+          className={`lg:col-span-7 bg-slate-900/65 backdrop-blur-md border p-5 sm:p-6 rounded-2xl shadow-xl space-y-5 transition-colors ${
+            editingOrderId
+              ? "border-amber-500/60"
+              : "border-white/[0.08]"
+          }`}
+        >
+          {/* CABECERA + BOTÓN CARTERA */}
+          {editingOrderId ? (
+            <div className="flex items-center justify-between bg-amber-500/12 border border-amber-500/35 p-3.5 rounded-xl">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center">
+                  <Pencil className="w-4 h-4" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-amber-300">
+                    Editando aviso de {name || "Cliente"}
+                  </h2>
+                  <p className="text-xs text-slate-300">
+                    Modifica los datos y pulsa Guardar Cambios.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={resetForm}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-white/[0.08]"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Cancelar</span>
+              </button>
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-sm font-black uppercase tracking-wider text-white">
-                  👥 Cartera de Clientes e Instalaciones ({customers.length})
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-4">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Wrench className="w-4 h-4 text-amber-400" />
+                  <span>Nuevo Parte de Asistencia</span>
                 </h2>
-                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                  Nuevo Aviso en 1 Clic
-                </span>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Registra una avería, revisión o instalación en 3 pasos rápidos.
+                </p>
               </div>
-              <p className="text-xs text-slate-400">
-                Crea partes de avería o revisión en 1 segundo usando las coordenadas GPS y equipo ya guardados.
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setShowHabitualDrawer((prev) => !prev)}
-            className={`px-4 py-2.5 rounded-2xl text-xs font-black transition flex items-center gap-2 border ${
-              showHabitualDrawer
-                ? "bg-amber-500 text-slate-950 border-amber-400 shadow-lg shadow-amber-500/20"
-                : "bg-slate-800 hover:bg-slate-700 text-amber-400 border-slate-700"
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>
-              {showHabitualDrawer
-                ? "Ocultar Cartera"
-                : `Abrir Cartera (${customers.length})`}
-            </span>
-            {showHabitualDrawer ? (
-              <ChevronUp className="w-4 h-4" />
-            ) : (
-              <ChevronDown className="w-4 h-4" />
-            )}
-          </button>
-        </div>
-
-        {showHabitualDrawer && (
-          <div className="p-5 border-t border-slate-800 space-y-4 bg-slate-950/50">
-            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-              <div className="sm:col-span-5 relative">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
-                <input
-                  type="text"
-                  placeholder="Buscar por nombre, aldea, equipo o teléfono..."
-                  value={habitualSearch}
-                  onChange={(e) => setHabitualSearch(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2.5 text-xs bg-slate-900 border border-slate-700 rounded-xl text-white font-bold outline-none focus:border-amber-500"
-                />
-              </div>
-
-              <div className="sm:col-span-3 flex items-center gap-2">
-                <Filter className="w-4 h-4 text-amber-400 shrink-0" />
-                <select
-                  value={habitualConcelloFilter}
-                  onChange={(e) => setHabitualConcelloFilter(e.target.value)}
-                  className="w-full px-3 py-2.5 text-xs bg-slate-900 border border-slate-700 rounded-xl text-white font-bold outline-none focus:border-amber-500"
-                >
-                  <option value="ALL">Todos los Concellos / Zonas</option>
-                  {availableConcellos.map((concello) => (
-                    <option key={concello} value={concello}>
-                      📍 {concello}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="sm:col-span-4 flex items-center gap-2">
-                <ArrowUpDown className="w-4 h-4 text-amber-400 shrink-0" />
-                <select
-                  value={habitualSort}
-                  onChange={(e) =>
-                    setHabitualSort(
-                      e.target.value as
-                        | "frequent"
-                        | "recent"
-                        | "inactive"
-                        | "alpha"
-                    )
-                  }
-                  className="w-full px-3 py-2.5 text-xs bg-slate-900 border border-slate-700 rounded-xl text-white font-bold outline-none focus:border-amber-500"
-                >
-                  <option value="frequent">🏆 Más asistencias históricas</option>
-                  <option value="inactive">⏳ Más tiempo sin revisión</option>
-                  <option value="recent">🕒 Último aviso más reciente</option>
-                  <option value="alpha">🔤 Orden Alfabético (A-Z)</option>
-                </select>
+              <div className="flex items-center gap-2">
+                {customers.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowHabitualDrawer((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 border ${
+                      showHabitualDrawer
+                        ? "bg-amber-500 text-slate-950 border-amber-400"
+                        : "bg-slate-800/80 hover:bg-slate-700 text-slate-200 border-white/[0.08]"
+                    }`}
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>Cartera ({customers.length})</span>
+                    {showHabitualDrawer ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
+                {selectedCustomerId && (
+                  <button
+                    type="button"
+                    onClick={resetForm}
+                    className="text-xs font-medium text-slate-400 hover:text-white px-2 py-1"
+                  >
+                    Limpiar
+                  </button>
+                )}
               </div>
             </div>
+          )}
 
-            {filteredHabitualCustomers.length === 0 ? (
-              <div className="p-8 text-center text-slate-400 text-xs border border-dashed border-slate-800 rounded-2xl">
-                {customers.length === 0
-                  ? "Todavía no hay clientes guardados. Registra tu primer aviso abajo y quedará guardado automáticamente."
-                  : "No hay clientes que coincidan con ese filtro."}
+          {/* CAJÓN DESPLEGABLE DE CARTERA (SI SE ABRE) */}
+          {showHabitualDrawer && (
+            <div className="p-4 rounded-2xl bg-slate-950/65 border border-white/[0.08] space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                <div className="sm:col-span-5 relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="Buscar cliente, aldea o equipo..."
+                    value={habitualSearch}
+                    onChange={(e) => setHabitualSearch(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-slate-900 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div className="sm:col-span-4 flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <select
+                    value={habitualConcelloFilter}
+                    onChange={(e) => setHabitualConcelloFilter(e.target.value)}
+                    className="w-full px-2.5 py-2 text-xs bg-slate-900 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
+                  >
+                    <option value="ALL">Todas las zonas</option>
+                    {availableConcellos.map((concello) => (
+                      <option key={concello} value={concello}>
+                        {concello}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="sm:col-span-3 flex items-center gap-1.5">
+                  <ArrowUpDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <select
+                    value={habitualSort}
+                    onChange={(e) =>
+                      setHabitualSort(
+                        e.target.value as
+                          | "frequent"
+                          | "recent"
+                          | "inactive"
+                          | "alpha"
+                      )
+                    }
+                    className="w-full px-2 py-2 text-xs bg-slate-900 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
+                  >
+                    <option value="frequent">Frecuentes</option>
+                    <option value="inactive">Sin revisión</option>
+                    <option value="recent">Recientes</option>
+                    <option value="alpha">A-Z</option>
+                  </select>
+                </div>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5 max-h-[520px] overflow-y-auto pr-1">
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-72 overflow-y-auto pr-1">
                 {filteredHabitualCustomers.map((c) => {
                   const cardMins =
                     habitualCardMinutes[c.id] ??
@@ -763,567 +971,186 @@ export default function CustomerOrdersTab({
                   return (
                     <div
                       key={c.id}
-                      className={`p-4 rounded-2xl border transition flex flex-col justify-between gap-3 text-xs ${
-                        activeQueue
-                          ? "bg-amber-500/10 border-amber-500/50"
-                          : "bg-slate-900/90 border-slate-800 hover:border-slate-700"
-                      }`}
+                      className="p-3 rounded-xl bg-slate-900/80 border border-white/[0.07] space-y-2 text-xs"
                     >
-                      <div className="space-y-2">
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <div className="font-black text-white text-sm">
-                              {c.name}
-                            </div>
-                            <div className="text-[11px] text-slate-300 flex items-center gap-1 mt-0.5">
-                              <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                              <span className="line-clamp-1">{c.village}</span>
-                            </div>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-bold text-white truncate">
+                            {c.name}
                           </div>
-
-                          {activeQueue ? (
-                            <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-amber-500 text-slate-950 shrink-0 shadow">
-                              🕒 En cola ({activeQueue.totalMinutes}m)
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700 shrink-0">
-                              {daysInfo.label}
-                            </span>
-                          )}
+                          <div className="text-slate-400 truncate">
+                            {c.village}
+                          </div>
                         </div>
-
-                        {c.equipmentInfo && (
-                          <div className="px-2.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-bold text-amber-300">
-                            ⚙️ {c.equipmentInfo}
-                          </div>
-                        )}
-
-                        {c.phone && (
-                          <div className="text-[11px] text-slate-400 flex items-center gap-1">
-                            <Phone className="w-3 h-3 text-slate-500" />
-                            <span>{c.phone}</span>
-                          </div>
-                        )}
+                        <span className="text-[11px] text-slate-400 shrink-0">
+                          {activeQueue
+                            ? `En cola (${activeQueue.totalMinutes}m)`
+                            : daysInfo.label}
+                        </span>
                       </div>
 
-                      <div className="space-y-2 pt-1 border-t border-slate-800/80">
-                        <div className="flex items-center justify-between gap-1">
-                          <div className="flex items-center gap-1">
-                            {(
-                              ["Avería", "Revisión", "Instalación"] as ServiceType[]
-                            ).map((tp) => (
-                              <button
-                                key={tp}
-                                type="button"
-                                onClick={() =>
-                                  setHabitualCardType((prev) => ({
-                                    ...prev,
-                                    [c.id]: tp,
-                                  }))
-                                }
-                                className={`px-2 py-1 rounded-lg text-[10px] font-bold transition ${
-                                  cardType === tp
-                                    ? "bg-amber-500 text-slate-950 font-black"
-                                    : "bg-slate-800 text-slate-400 hover:text-white"
-                                }`}
-                              >
-                                {tp === "Avería"
-                                  ? "🔧 Avería"
-                                  : tp === "Revisión"
-                                  ? "📋 Rev."
-                                  : "⚙️ Inst."}
-                              </button>
-                            ))}
-                          </div>
-
-                          <div className="flex items-center gap-1">
-                            {[30, 45, 60, 90].map((m) => (
-                              <button
-                                key={m}
-                                type="button"
-                                onClick={() =>
-                                  setHabitualCardMinutes((prev) => ({
-                                    ...prev,
-                                    [c.id]: m,
-                                  }))
-                                }
-                                className={`px-1.5 py-1 rounded-lg text-[10px] font-bold ${
-                                  cardMins === m
-                                    ? "bg-sky-600 text-white font-black"
-                                    : "bg-slate-800 text-slate-400"
-                                }`}
-                              >
-                                {m}m
-                              </button>
-                            ))}
-                          </div>
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex gap-1">
+                          {(
+                            ["Avería", "Revisión", "Instalación"] as ServiceType[]
+                          ).map((tp) => (
+                            <button
+                              key={tp}
+                              type="button"
+                              onClick={() =>
+                                setHabitualCardType((prev) => ({
+                                  ...prev,
+                                  [c.id]: tp,
+                                }))
+                              }
+                              className={`px-2 py-0.5 rounded text-[11px] font-semibold ${
+                                cardType === tp
+                                  ? "bg-amber-500 text-slate-950"
+                                  : "bg-slate-800 text-slate-400"
+                              }`}
+                            >
+                              {tp.slice(0, 4)}.
+                            </button>
+                          ))}
                         </div>
+                        <div className="flex gap-1">
+                          {[30, 45, 60].map((m) => (
+                            <button
+                              key={m}
+                              type="button"
+                              onClick={() =>
+                                setHabitualCardMinutes((prev) => ({
+                                  ...prev,
+                                  [c.id]: m,
+                                }))
+                              }
+                              className={`px-1.5 py-0.5 rounded text-[11px] font-semibold ${
+                                cardMins === m
+                                  ? "bg-sky-600 text-white"
+                                  : "bg-slate-800 text-slate-400"
+                              }`}
+                            >
+                              {m}m
+                            </button>
+                          ))}
+                        </div>
+                      </div>
 
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleQuickCreateService(c, cardType, cardMins)
-                            }
-                            className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs transition shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5"
-                          >
-                            <Zap className="w-3.5 h-3.5" />
-                            <span>
-                              ⚡ Crear {cardType} ({cardMins}m)
-                            </span>
-                          </button>
-
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleQuickCreateService(c, cardType, cardMins)
+                          }
+                          className="flex-1 py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1"
+                        >
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>Crear ({cardMins}m)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            selectExistingCustomer(c);
+                            setShowHabitualDrawer(false);
+                          }}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                          title="Cargar ficha"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        {confirmDeleteCustomerId === c.id ? (
                           <button
                             type="button"
                             onClick={() => {
-                              selectExistingCustomer(c);
-                              setShowHabitualDrawer(false);
+                              onDeleteCustomer(c.id);
+                              setConfirmDeleteCustomerId(null);
                             }}
-                            title="Cargar en formulario y ver en mapa satélite"
-                            className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-amber-400 border border-slate-700 transition"
+                            className="px-2 py-1 rounded-lg bg-rose-600 text-white font-bold text-[11px]"
                           >
-                            <Pencil className="w-3.5 h-3.5" />
+                            Borrar
                           </button>
-
-                          {confirmDeleteCustomerId === c.id ? (
-                            <div className="flex items-center gap-1 bg-red-950/80 border border-red-500/60 px-2 py-1 rounded-xl">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  onDeleteCustomer(c.id);
-                                  setConfirmDeleteCustomerId(null);
-                                }}
-                                className="text-[10px] font-black text-red-300 hover:text-white px-1.5 py-0.5 rounded bg-red-600"
-                              >
-                                Sí
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteCustomerId(null)}
-                                className="text-[10px] font-bold text-slate-300 hover:text-white px-1"
-                              >
-                                No
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteCustomerId(c.id)}
-                              title="Eliminar cliente"
-                              className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-red-400 border border-slate-700 transition"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteCustomerId(c.id)}
+                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-rose-400"
+                            title="Eliminar cliente"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
                 })}
               </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* COLUMNA IZQUIERDA: FORMULARIO DE CLIENTE Y PARTE DE TRABAJO */}
-        <div
-          ref={formContainerRef}
-          className={`lg:col-span-7 bg-slate-900 border p-6 rounded-3xl shadow-xl space-y-5 transition-colors ${
-            editingOrderId
-              ? "border-amber-500/80 ring-1 ring-amber-500/40"
-              : "border-slate-800"
-          }`}
-        >
-          {editingOrderId ? (
-            <div className="flex items-center justify-between bg-amber-500/15 border-2 border-amber-500/60 p-3.5 rounded-2xl">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-black shadow-md">
-                  <Pencil className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="text-sm font-black text-amber-300">
-                    ✏️ Editando aviso de {name || "Cliente"}
-                  </h2>
-                  <p className="text-[11px] text-slate-300">
-                    Ajusta tipo, urgencia, duración, equipo o afina la chincheta en el satélite.
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={resetForm}
-                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold transition flex items-center gap-1.5 border border-slate-700 shrink-0"
-              >
-                <X className="w-3.5 h-3.5" />
-                <span>Cancelar</span>
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div>
-                <h2 className="text-sm font-black uppercase tracking-wider text-white flex items-center gap-2">
-                  <Wrench className="w-4 h-4 text-amber-400" />
-                  Nuevo Parte / Aviso Técnico (Avería o Revisión)
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Localización exacta por Google Maps Satélite Híbrido + Ficha de Equipo.
-                </p>
-              </div>
-              {selectedCustomerId && (
-                <button
-                  type="button"
-                  onClick={resetForm}
-                  className="text-xs font-bold text-slate-400 hover:text-white"
-                >
-                  Limpiar Formulario
-                </button>
-              )}
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {/* SUPER-BUSCADOR DE CLIENTES */}
-            <div className="relative space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="block text-xs font-black text-slate-200">
-                  Buscar Cliente / Instalación Habitual o Escribir Nuevo *
-                </label>
-                {customers.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setShowCustomerDropdown((prev) => !prev)
-                    }
-                    className="text-[11px] font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1"
-                  >
-                    <Zap className="w-3 h-3" />
-                    <span>
-                      {showCustomerDropdown
-                        ? "Cerrar lista rápida"
-                        : `Ver recientes (${customers.length})`}
-                    </span>
-                  </button>
-                )}
-              </div>
-
-              <div className="relative">
-                <Search className="w-4 h-4 text-amber-400 absolute left-3.5 top-3" />
-                <input
-                  type="text"
-                  required
-                  placeholder="Escribe nombre, teléfono, aldea o equipo..."
-                  value={name}
-                  onFocus={() => {
-                    if (customers.length > 0 && !editingOrderId) {
-                      setShowCustomerDropdown(true);
-                    }
-                  }}
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    setCustomerSearch(e.target.value);
-                    setShowCustomerDropdown(true);
-                    if (selectedCustomerId) setSelectedCustomerId(null);
-                  }}
-                  className="w-full pl-10 pr-9 py-2.5 text-xs bg-slate-800 border border-slate-700 rounded-xl text-white font-bold outline-none focus:border-amber-500"
-                />
-                {name && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setName("");
-                      setCustomerSearch("");
-                      setSelectedCustomerId(null);
-                    }}
-                    className="absolute right-3 top-2.5 text-slate-400 hover:text-white text-xs"
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-
-              {detectedExistingCustomer && !selectedCustomerId && (
-                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2 text-[11px]">
-                  <div className="text-amber-200">
-                    💡 Coincide con cliente guardado:{" "}
-                    <strong className="text-white">
-                      {detectedExistingCustomer.name}
-                    </strong>{" "}
-                    ({detectedExistingCustomer.village}).
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      selectExistingCustomer(detectedExistingCustomer)
-                    }
-                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-[10px] border border-slate-700 shrink-0"
-                  >
-                    ✏️ Cargar GPS y Equipo
-                  </button>
-                </div>
-              )}
-
-              {showCustomerDropdown &&
-                matchingCustomers.length > 0 &&
-                !editingOrderId && (
-                  <div className="absolute left-0 right-0 top-full mt-1.5 bg-slate-900 border-2 border-amber-500/60 rounded-2xl shadow-2xl z-30 max-h-80 overflow-y-auto p-2 space-y-1.5">
-                    <div className="flex items-center justify-between px-2 py-1 border-b border-slate-800 text-[10px] font-black uppercase text-slate-400">
-                      <span>Clientes e Instalaciones ({matchingCustomers.length})</span>
-                      <button
-                        type="button"
-                        onClick={() => setShowCustomerDropdown(false)}
-                        className="text-slate-400 hover:text-white"
-                      >
-                        ✕ Cerrar
-                      </button>
-                    </div>
-
-                    {matchingCustomers.map((c) => (
-                      <div
-                        key={c.id}
-                        className="p-2.5 rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <div className="font-black text-white text-xs">
-                            {c.name}
-                          </div>
-                          <div className="text-[11px] text-slate-300 truncate">
-                            📍 {c.village}
-                            {c.equipmentInfo ? ` · ⚙️ ${c.equipmentInfo}` : ""}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleQuickCreateService(c, "Avería", 45)
-                            }
-                            className="px-2.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-black text-[10px]"
-                          >
-                            🔧 + Avería
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleQuickCreateService(c, "Revisión", 45)
-                            }
-                            className="px-2.5 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-black text-[10px]"
-                          >
-                            📋 + Revisión
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => selectExistingCustomer(c)}
-                            className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-[10px]"
-                          >
-                            ✏️ Cargar
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-            </div>
-
-            {/* BUSCADOR GOOGLE MAPS + PEGAR COORDS */}
-            <div className="relative p-4 rounded-2xl bg-slate-950 border-2 border-amber-500/40 space-y-2.5 shadow-inner">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-black uppercase tracking-wider text-amber-400 flex items-center gap-2">
-                  <div className="w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center text-[10px] font-black shadow">
-                    G
-                  </div>
-                  <span>Buscar Ubicación en Google Maps (Aldea, nave, calle...)</span>
-                </label>
-
-                {isSearchingGoogle && (
-                  <span className="text-[11px] text-amber-400 font-bold flex items-center gap-1.5">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Buscando...
-                  </span>
-                )}
-              </div>
-
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Ej. Polígono San Cibrao, Bar A Boeira Allariz, O Vilar..."
-                  value={googleQuery}
-                  onChange={(e) => setGoogleQuery(e.target.value)}
-                  onFocus={() => {
-                    if (googleResults.length > 0) setShowGoogleDropdown(true);
-                  }}
-                  className="flex-1 px-4 py-2.5 text-xs bg-slate-900 border border-slate-700 rounded-xl text-white font-bold outline-none focus:border-amber-500"
-                />
-                <button
-                  type="button"
-                  onClick={handlePasteCoordsOrLink}
-                  className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold shrink-0 flex items-center gap-1.5 transition"
-                >
-                  <ClipboardPaste className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden sm:inline">Pegar Coords/Link</span>
-                </button>
-              </div>
-
-              {showGoogleDropdown && googleResults.length > 0 && (
-                <div className="absolute left-3 right-3 top-full mt-1.5 bg-slate-900 border-2 border-amber-500/60 rounded-2xl shadow-2xl z-30 max-h-64 overflow-y-auto p-1.5 space-y-1">
-                  <div className="flex items-center justify-between px-2.5 py-1 text-[10px] font-bold text-slate-400 uppercase border-b border-slate-800">
-                    <span>Resultados encontrados:</span>
-                    <button
-                      type="button"
-                      onClick={() => setShowGoogleDropdown(false)}
-                      className="text-slate-400 hover:text-white"
-                    >
-                      ✕ Cerrar
-                    </button>
-                  </div>
-                  {googleResults.map((place) => (
-                    <button
-                      key={place.id}
-                      type="button"
-                      onClick={() => handleSelectGooglePlace(place)}
-                      className="w-full text-left p-2.5 rounded-xl hover:bg-slate-800 text-xs flex items-center justify-between gap-2 transition"
-                    >
-                      <div>
-                        <div className="font-black text-white text-sm">
-                          {place.title}
-                        </div>
-                        <div className="text-[11px] text-slate-300">
-                          {place.subtitle}
-                        </div>
-                      </div>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-800 text-amber-300 border border-slate-700 shrink-0">
-                        {place.source}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* CAMPOS DE DIRECCIÓN, TELÉFONO Y EQUIPO */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                  Dirección / Aldea / Concello *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Ej. Lugar de Vilar 12, Allariz"
-                  value={village}
-                  onChange={(e) => setVillage(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-800 border border-slate-700 rounded-xl text-white outline-none focus:border-amber-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                  Teléfono de Contacto
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ej. 654 321 987"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-3 py-2 text-xs bg-slate-800 border border-slate-700 rounded-xl text-white outline-none focus:border-amber-500"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-bold text-slate-300 mb-1">
-                Equipo / Instalación a Revisar o Reparar
-              </label>
-              <input
-                type="text"
-                placeholder="Ej. Caldera Domusa 25kW, Aerotermia Daikin, Cuadro eléctrico trifásico..."
-                value={equipmentInfo}
-                onChange={(e) => setEquipmentInfo(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-slate-800 border border-slate-700 rounded-xl text-amber-200 font-bold outline-none focus:border-amber-500"
-              />
-            </div>
-
-            {/* MAPA SATÉLITE */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                  <Satellite className="w-4 h-4 text-amber-400" />
-                  Ubicación Exacta en Satélite (Haz clic sobre el tejado o entrada)
-                </span>
-                <span className="font-mono text-[11px] text-amber-400 font-bold flex items-center gap-1">
-                  <Crosshair className="w-3.5 h-3.5" />
-                  {lat}, {lng}
-                </span>
-              </div>
-
-              {confirmedStatus && (
-                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
-                  {confirmedStatus}
-                </div>
-              )}
-
-              <PrecisionMapPicker
-                coordinates={{
-                  lat: parseFloat(lat) || 42.2982,
-                  lng: parseFloat(lng) || -7.8185,
-                }}
-                onChange={handleMapClick}
-                height="280px"
-                zoom={19}
-              />
-            </div>
-
-            {/* BLOQUE DATOS DEL PARTE / AVISO */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* PASO 1: QUÉ Y QUIÉN */}
+            <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <label className="text-xs font-black uppercase tracking-wider text-white">
-                  Tipo de Aviso y Prioridad
-                </label>
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                  1. Qué ocurre y quién llama
+                </span>
 
-                <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-xl border border-slate-800">
+                <div className="flex items-center gap-1 bg-slate-950/70 p-1 rounded-xl border border-white/[0.06]">
                   <button
                     type="button"
                     onClick={() => setOrderPriority("Normal")}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition ${
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition ${
                       orderPriority === "Normal"
                         ? "bg-slate-800 text-white"
                         : "text-slate-400 hover:text-white"
                     }`}
                   >
-                    Prioridad Normal
+                    Normal
                   </button>
                   <button
                     type="button"
                     onClick={() => setOrderPriority("Urgente")}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-black transition flex items-center gap-1 ${
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 ${
                       orderPriority === "Urgente"
                         ? "bg-rose-600 text-white shadow"
-                        : "text-rose-400/70 hover:text-rose-300"
+                        : "text-rose-400/80 hover:text-rose-300"
                     }`}
                   >
-                    <Flame className="w-3 h-3" />
-                    <span>🚨 Urgente (Turno #1)</span>
+                    <Flame className="w-3.5 h-3.5" />
+                    <span>Urgente</span>
                   </button>
                 </div>
               </div>
 
-              {/* 3 Tipos de Servicio */}
+              {/* Selector Tipo Servicio */}
               <div className="grid grid-cols-3 gap-2">
                 {(
                   [
-                    { type: "Avería", icon: Wrench, activeCls: "bg-amber-500 text-slate-950 font-black" },
-                    { type: "Revisión", icon: ClipboardCheck, activeCls: "bg-sky-500 text-slate-950 font-black" },
-                    { type: "Instalación", icon: Cog, activeCls: "bg-emerald-500 text-slate-950 font-black" },
+                    {
+                      type: "Avería",
+                      icon: Wrench,
+                      activeCls: "bg-amber-500 text-slate-950 font-bold",
+                    },
+                    {
+                      type: "Revisión",
+                      icon: ClipboardCheck,
+                      activeCls: "bg-sky-500 text-slate-950 font-bold",
+                    },
+                    {
+                      type: "Instalación",
+                      icon: Cog,
+                      activeCls: "bg-emerald-500 text-slate-950 font-bold",
+                    },
                   ] as const
                 ).map(({ type, icon: Icon, activeCls }) => (
                   <button
                     key={type}
                     type="button"
                     onClick={() => setServiceType(type)}
-                    className={`py-2.5 px-3 rounded-xl text-xs border transition flex items-center justify-center gap-1.5 ${
+                    className={`h-10 px-3 rounded-xl text-xs sm:text-sm border transition flex items-center justify-center gap-2 ${
                       serviceType === type
                         ? `${activeCls} border-transparent shadow-md`
-                        : "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800 font-bold"
+                        : "bg-slate-950/55 border-white/[0.07] text-slate-300 hover:bg-slate-800 font-medium"
                     }`}
                   >
                     <Icon className="w-4 h-4" />
@@ -1332,14 +1159,375 @@ export default function CustomerOrdersTab({
                 ))}
               </div>
 
-              {/* Duración Estimada y Presupuesto */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="font-bold text-slate-300">
-                      Duración Estimada (min)
+              {/* Buscador / Nombre de Cliente */}
+              <div className="relative space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-slate-300">
+                    Cliente o Instalación *
+                  </label>
+                  {customers.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomerDropdown((prev) => !prev)}
+                      className="text-xs font-medium text-amber-400 hover:text-amber-300"
+                    >
+                      {showCustomerDropdown
+                        ? "Ocultar recientes"
+                        : `Recientes (${customers.length})`}
+                    </button>
+                  )}
+                </div>
+
+                <div className="relative">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
+                  <input
+                    type="text"
+                    required
+                    placeholder="Nombre del cliente, empresa o busca uno guardado..."
+                    value={name}
+                    onFocus={() => {
+                      if (customers.length > 0 && !editingOrderId) {
+                        setShowCustomerDropdown(true);
+                      }
+                    }}
+                    onChange={(e) => {
+                      setName(e.target.value);
+                      setCustomerSearch(e.target.value);
+                      setShowCustomerDropdown(true);
+                      if (selectedCustomerId) setSelectedCustomerId(null);
+                    }}
+                    className="w-full h-11 pl-10 pr-9 text-sm bg-slate-950/60 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500 transition"
+                  />
+                  {name && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setName("");
+                        setCustomerSearch("");
+                        setSelectedCustomerId(null);
+                      }}
+                      className="absolute right-3 top-3 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                {detectedExistingCustomer && !selectedCustomerId && (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-between gap-2 text-xs">
+                    <span className="text-amber-200 truncate">
+                      Coincide con{" "}
+                      <strong className="text-white">
+                        {detectedExistingCustomer.name}
+                      </strong>
                     </span>
-                    <span className="font-mono font-black text-amber-400">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        selectExistingCustomer(detectedExistingCustomer)
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold shrink-0"
+                    >
+                      Cargar GPS y Equipo
+                    </button>
+                  </div>
+                )}
+
+                {showCustomerDropdown &&
+                  matchingCustomers.length > 0 &&
+                  !editingOrderId && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-slate-900/95 backdrop-blur-md border border-white/[0.12] rounded-2xl shadow-2xl z-30 max-h-72 overflow-y-auto p-2 space-y-1.5">
+                      <div className="flex items-center justify-between px-2 py-1 border-b border-white/[0.06] text-xs text-slate-400">
+                        <span>Clientes guardados ({matchingCustomers.length})</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowCustomerDropdown(false)}
+                          className="hover:text-white"
+                        >
+                          Cerrar
+                        </button>
+                      </div>
+                      {matchingCustomers.map((c) => (
+                        <div
+                          key={c.id}
+                          className="p-2.5 rounded-xl bg-slate-950/60 hover:bg-slate-800/80 border border-white/[0.05] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-semibold text-white text-sm">
+                              {c.name}
+                            </div>
+                            <div className="text-xs text-slate-400 truncate">
+                              {c.village}
+                              {c.equipmentInfo ? ` · ${c.equipmentInfo}` : ""}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleQuickCreateService(c, "Avería", 45)
+                              }
+                              className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs"
+                            >
+                              + Avería
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => selectExistingCustomer(c)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs"
+                            >
+                              Cargar
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Teléfono de contacto
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej. 654 321 987"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    className="w-full h-11 px-3.5 text-sm bg-slate-950/60 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Equipo / Instalación
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ej. Caldera Domusa 25kW, Aerotermia..."
+                    value={equipmentInfo}
+                    onChange={(e) => setEquipmentInfo(e.target.value)}
+                    className="w-full h-11 px-3.5 text-sm bg-slate-950/60 border border-white/[0.08] rounded-xl text-amber-200 font-medium outline-none focus:border-amber-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* PASO 2: UBICACIÓN INTELIGENTE + MAPA COLAPSABLE */}
+            <div className="space-y-3.5 pt-4 border-t border-white/[0.06]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                  2. Ubicación en Google Maps
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleUseMyGps}
+                    disabled={isGettingGps}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-sky-300 border border-white/[0.08] text-xs font-semibold flex items-center gap-1.5 transition"
+                  >
+                    {isGettingGps ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <LocateFixed className="w-3.5 h-3.5" />
+                    )}
+                    <span>Mi GPS</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePasteCoordsOrLink}
+                    className="px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-white/[0.08] text-xs font-semibold flex items-center gap-1.5 transition"
+                  >
+                    <ClipboardPaste className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Pegar Link/Coords</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Buscador Google Maps */}
+              <div className="relative">
+                <Search className="w-4 h-4 text-amber-400 absolute left-3.5 top-3.5" />
+                <input
+                  type="text"
+                  placeholder="Busca calle + número, aldea, negocio o pega un enlace de Google Maps..."
+                  value={googleQuery}
+                  onChange={(e) => setGoogleQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleDirectLocationResolution(googleQuery);
+                    }
+                  }}
+                  onFocus={() => {
+                    if (googleResults.length > 0 || hasSearchedOnce) {
+                      setShowGoogleDropdown(true);
+                    }
+                  }}
+                  className="w-full h-11 pl-10 pr-20 text-sm bg-slate-950/70 border border-amber-500/30 rounded-xl text-white outline-none focus:border-amber-500 transition"
+                />
+                <div className="absolute right-3 top-3 flex items-center gap-1.5">
+                  {isSearchingGoogle && (
+                    <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                  )}
+                  {googleQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGoogleQuery("");
+                        setGoogleResults([]);
+                        setHasSearchedOnce(false);
+                        setShowGoogleDropdown(false);
+                      }}
+                      className="text-slate-400 hover:text-white p-0.5"
+                      aria-label="Limpiar búsqueda"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Dropdown de resultados o estado vacío amigable */}
+                {showGoogleDropdown &&
+                  (googleResults.length > 0 ||
+                    (!isSearchingGoogle &&
+                      hasSearchedOnce &&
+                      googleQuery.trim().length >= 2)) && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-slate-900/95 backdrop-blur-md border border-white/[0.12] rounded-2xl shadow-2xl z-30 max-h-72 overflow-y-auto p-1.5 space-y-1">
+                      <div className="flex items-center justify-between px-2.5 py-1 text-xs text-slate-400 border-b border-white/[0.06]">
+                        <span>
+                          {googleResults.length > 0
+                            ? "Selecciona ubicación"
+                            : "Sin coincidencias"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowGoogleDropdown(false)}
+                          className="hover:text-white"
+                        >
+                          Cerrar
+                        </button>
+                      </div>
+
+                      {googleResults.length === 0 ? (
+                        <div className="p-3 text-xs text-slate-400 leading-relaxed">
+                          Sin resultados para{" "}
+                          <strong className="text-white">«{googleQuery}»</strong>.
+                          Prueba con{" "}
+                          <span className="text-amber-300">
+                            calle + localidad
+                          </span>
+                          , pega un enlace de Google Maps o pincha directamente en el mapa.
+                        </div>
+                      ) : (
+                        googleResults.map((place) => {
+                          const TypeIcon =
+                            place.categoryType === "business"
+                              ? Building2
+                              : place.categoryType === "hamlet"
+                              ? Home
+                              : MapPin;
+                          const iconColor =
+                            place.categoryType === "business"
+                              ? "text-amber-400"
+                              : place.categoryType === "hamlet"
+                              ? "text-emerald-400"
+                              : "text-sky-400";
+
+                          return (
+                            <button
+                              key={place.id}
+                              type="button"
+                              onClick={() => handleSelectGooglePlace(place)}
+                              className="w-full text-left p-2.5 rounded-xl hover:bg-slate-800/80 text-xs flex items-center justify-between gap-2 transition"
+                            >
+                              <div className="flex items-start gap-2.5 min-w-0">
+                                <TypeIcon
+                                  className={`w-4 h-4 shrink-0 mt-0.5 ${iconColor}`}
+                                />
+                                <div className="min-w-0">
+                                  <div className="font-bold text-white text-sm truncate">
+                                    {place.title}
+                                  </div>
+                                  <div className="text-xs text-slate-400 truncate">
+                                    {place.subtitle}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 shrink-0">
+                                {place.source}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">
+                  Dirección / Aldea / Concello *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej. Lugar de Vilar 12, Allariz"
+                  value={village}
+                  onChange={(e) => setVillage(e.target.value)}
+                  className="w-full h-11 px-3.5 text-sm bg-slate-950/60 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
+                />
+              </div>
+
+              {/* Píldora de ubicación fijada + Mapa Satélite Colapsable */}
+              <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-950/55 border border-white/[0.07]">
+                <div className="flex items-center gap-2 text-xs min-w-0">
+                  <Satellite
+                    className={`w-4 h-4 shrink-0 ${
+                      isLocationPinned ? "text-emerald-400" : "text-amber-400"
+                    }`}
+                  />
+                  <span className="text-slate-200 truncate">
+                    {confirmedStatus ||
+                      (isLocationPinned
+                        ? `GPS fijado: ${lat}, ${lng}`
+                        : "Haz clic en el mapa satélite para afinar la entrada")}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsMapExpanded((p) => !p)}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold shrink-0 transition"
+                >
+                  {isMapExpanded ? "Ocultar mapa" : "Ajustar en mapa satélite"}
+                </button>
+              </div>
+
+              {isMapExpanded && (
+                <PrecisionMapPicker
+                  coordinates={{
+                    lat: parseFloat(lat) || config.warehouseCoordinates.lat,
+                    lng: parseFloat(lng) || config.warehouseCoordinates.lng,
+                  }}
+                  onChange={handleMapClick}
+                  height="260px"
+                  zoom={19}
+                />
+              )}
+            </div>
+
+            {/* PASO 3: DURACIÓN, PRESUPUESTO Y NOTAS */}
+            <div className="space-y-4 pt-4 border-t border-white/[0.06]">
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-400 block">
+                3. Duración, Presupuesto y Notas
+              </span>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-slate-300">
+                      Duración estimada
+                    </span>
+                    <span className="font-mono font-bold text-amber-400 tabular-nums">
                       {formatHoursMinutes(estimatedMinutes)}
                     </span>
                   </div>
@@ -1349,7 +1537,7 @@ export default function CustomerOrdersTab({
                       onClick={() =>
                         setEstimatedMinutes((m) => Math.max(15, m - 15))
                       }
-                      className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold"
+                      className="h-10 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold"
                     >
                       -15m
                     </button>
@@ -1364,28 +1552,28 @@ export default function CustomerOrdersTab({
                           Math.max(15, parseInt(e.target.value, 10) || 45)
                         )
                       }
-                      className="w-full text-center text-base font-black py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-amber-400 outline-none"
+                      className="w-full h-10 text-center text-base font-bold rounded-xl bg-slate-950/60 border border-white/[0.08] text-amber-400 outline-none tabular-nums"
                     />
                     <button
                       type="button"
                       onClick={() =>
                         setEstimatedMinutes((m) => Math.min(480, m + 15))
                       }
-                      className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold"
+                      className="h-10 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold"
                     >
                       +15m
                     </button>
                   </div>
-                  <div className="flex flex-wrap gap-1 pt-0.5">
+                  <div className="flex flex-wrap gap-1.5">
                     {[30, 45, 60, 90, 120].map((m) => (
                       <button
                         key={m}
                         type="button"
                         onClick={() => setEstimatedMinutes(m)}
-                        className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold ${
                           estimatedMinutes === m
-                            ? "bg-amber-500 text-slate-950 font-black"
-                            : "bg-slate-800 text-slate-400 hover:text-white"
+                            ? "bg-amber-500 text-slate-950 font-bold"
+                            : "bg-slate-800/70 text-slate-400 hover:text-white"
                         }`}
                       >
                         {m}m
@@ -1395,8 +1583,8 @@ export default function CustomerOrdersTab({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="block text-[11px] font-bold text-slate-300">
-                    Presupuesto / Cobro Est. (€)
+                  <label className="block text-xs font-medium text-slate-300">
+                    Presupuesto / Cobro est. (€)
                   </label>
                   <input
                     type="number"
@@ -1405,78 +1593,73 @@ export default function CustomerOrdersTab({
                     placeholder="Ej. 85.00 (0 = garantía)"
                     value={estimatedPriceEur}
                     onChange={(e) => setEstimatedPriceEur(e.target.value)}
-                    className="w-full px-3 py-2 text-base bg-slate-900 border border-slate-700 rounded-xl text-emerald-400 font-mono font-black outline-none focus:border-emerald-500"
+                    className="w-full h-10 px-3.5 text-base bg-slate-950/60 border border-white/[0.08] rounded-xl text-emerald-400 font-mono font-bold outline-none focus:border-emerald-500 tabular-nums"
                   />
-                  <span className="text-[10px] text-slate-400 block">
-                    Se mostrará al técnico al cerrar el parte para confirmar cobro.
+                  <span className="text-xs text-slate-400 block">
+                    Opcional. El técnico podrá ajustarlo al cerrar el parte.
                   </span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-medium text-slate-300">
+                  Síntoma / Material necesario / Notas de acceso
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ej. Falla encendido, llevar electrodo, llaves en portería..."
+                  value={technicalNotes}
+                  onChange={(e) => setTechnicalNotes(e.target.value)}
+                  className="w-full h-11 px-3.5 text-sm bg-slate-950/60 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
+                />
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    "Llevar repuestos/maletín",
+                    "Recoger llaves",
+                    "Perro en finca",
+                    "Llamar antes de ir",
+                    estimatedPriceEur && parseFloat(estimatedPriceEur) > 0
+                      ? `Cobrar ${estimatedPriceEur}€ al finalizar`
+                      : "Cobrar al finalizar",
+                  ].map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => handleAppendNoteChip(chip)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800/70 hover:bg-slate-700 border border-white/[0.06] text-xs font-medium text-slate-300 hover:text-amber-300 transition"
+                    >
+                      + {chip}
+                    </button>
+                  ))}
                 </div>
               </div>
             </div>
 
-            {/* NOTAS TÉCNICAS + CHIPS RÁPIDOS */}
-            <div className="space-y-2">
-              <label className="block text-[11px] font-bold text-slate-300">
-                Síntoma / Material Necesario / Notas de Acceso
-              </label>
-              <input
-                type="text"
-                placeholder="Ej. Falla encendido, llevar electrodo y junta, llaves en portería..."
-                value={technicalNotes}
-                onChange={(e) => setTechnicalNotes(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-slate-800 border border-slate-700 rounded-xl text-white outline-none focus:border-amber-500"
-              />
-              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-[10px] text-slate-400 font-bold mr-1">
-                  + Añadir en 1 clic:
-                </span>
-                {[
-                  "🧰 Llevar repuestos/maletín",
-                  "🔑 Recoger llaves",
-                  "🐕 Perro en finca",
-                  "📞 Llamar antes de ir",
-                  "⚡ Revisar cuadro/toma",
-                  estimatedPriceEur && parseFloat(estimatedPriceEur) > 0
-                    ? `💶 Cobrar ${estimatedPriceEur}€ al finalizar`
-                    : "💶 Cobrar al finalizar",
-                ].map((chip) => (
-                  <button
-                    key={chip}
-                    type="button"
-                    onClick={() => handleAppendNoteChip(chip)}
-                    className="px-2 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-[10px] font-bold text-slate-300 hover:text-amber-300 transition"
-                  >
-                    + {chip}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* BOTÓN GUARDAR / REGISTRAR */}
+            {/* BOTÓN SUBMIT */}
             {editingOrderId ? (
               <div className="flex items-center gap-3 pt-2">
                 <button
                   type="button"
                   onClick={resetForm}
-                  className="w-1/3 py-4 px-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs sm:text-sm transition border border-slate-700 flex items-center justify-center gap-1.5"
+                  className="w-1/3 h-12 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-sm transition border border-white/[0.08] flex items-center justify-center gap-1.5"
                 >
                   <X className="w-4 h-4" />
                   <span>Cancelar</span>
                 </button>
                 <button
                   type="submit"
-                  className="w-2/3 py-4 px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs sm:text-sm transition shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2"
+                  className="w-2/3 h-12 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2"
                 >
-                  <Save className="w-4 h-4 sm:w-5 sm:h-5" />
+                  <Save className="w-4 h-4" />
                   <span>
-                    💾 Guardar Cambios ({serviceType} · {estimatedMinutes} min)
+                    Guardar Cambios ({serviceType} · {estimatedMinutes} min)
                   </span>
                 </button>
               </div>
             ) : (
               <button
                 type="submit"
-                className="w-full py-4 px-4 rounded-2xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-black text-sm transition shadow-lg shadow-amber-600/25 flex items-center justify-center gap-2"
+                className="w-full h-12 rounded-2xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
               >
                 <Plus className="w-5 h-5" />
                 <span>
@@ -1489,24 +1672,24 @@ export default function CustomerOrdersTab({
 
         {/* COLUMNA DERECHA: COLA DE AVISOS */}
         <div className="lg:col-span-5 space-y-4">
-          <div className="bg-slate-900 border border-slate-800 p-6 rounded-3xl shadow-xl space-y-4">
-            <div className="space-y-3 border-b border-slate-800 pb-3">
+          <div className="bg-slate-900/65 backdrop-blur-md border border-white/[0.08] p-5 sm:p-6 rounded-2xl shadow-xl space-y-4">
+            <div className="space-y-3 border-b border-white/[0.06] pb-3.5">
               <div className="flex items-center justify-between">
-                <h3 className="text-sm font-black uppercase tracking-wider text-white">
+                <h3 className="text-sm font-bold uppercase tracking-wider text-white">
                   Cola de Avisos ({filteredQueueOrders.length})
                 </h3>
-                <span className="text-xs text-amber-400 font-bold">
+                <span className="text-xs text-amber-400 font-semibold tabular-nums">
                   Activos: {formatHoursMinutes(totalPendingMinutes)}
                 </span>
               </div>
 
-              <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-2xl border border-slate-800 text-[11px] font-bold">
+              <div className="grid grid-cols-3 gap-1 bg-slate-950/70 p-1 rounded-xl border border-white/[0.06] text-xs font-semibold">
                 <button
                   type="button"
                   onClick={() => setQueueStatusFilter("ACTIVOS")}
-                  className={`py-1.5 px-2 rounded-xl transition ${
+                  className={`py-1.5 px-2 rounded-lg transition ${
                     queueStatusFilter === "ACTIVOS"
-                      ? "bg-amber-500 text-slate-950 font-black shadow"
+                      ? "bg-amber-500 text-slate-950 font-bold"
                       : "text-slate-400 hover:text-white"
                   }`}
                 >
@@ -1515,9 +1698,9 @@ export default function CustomerOrdersTab({
                 <button
                   type="button"
                   onClick={() => setQueueStatusFilter("Completado")}
-                  className={`py-1.5 px-2 rounded-xl transition ${
+                  className={`py-1.5 px-2 rounded-lg transition ${
                     queueStatusFilter === "Completado"
-                      ? "bg-emerald-600 text-white font-black shadow"
+                      ? "bg-emerald-600 text-white font-bold"
                       : "text-slate-400 hover:text-white"
                   }`}
                 >
@@ -1526,9 +1709,9 @@ export default function CustomerOrdersTab({
                 <button
                   type="button"
                   onClick={() => setQueueStatusFilter("ALL")}
-                  className={`py-1.5 px-2 rounded-xl transition ${
+                  className={`py-1.5 px-2 rounded-lg transition ${
                     queueStatusFilter === "ALL"
-                      ? "bg-slate-800 text-white font-black shadow"
+                      ? "bg-slate-800 text-white font-bold"
                       : "text-slate-400 hover:text-white"
                   }`}
                 >
@@ -1544,15 +1727,15 @@ export default function CustomerOrdersTab({
                     placeholder="Filtrar por cliente, aldea, equipo..."
                     value={queueSearchQuery}
                     onChange={(e) => setQueueSearchQuery(e.target.value)}
-                    className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-amber-500"
+                    className="w-full pl-8 pr-7 py-2 text-xs bg-slate-950/60 border border-white/[0.08] rounded-xl text-white outline-none focus:border-amber-500"
                   />
                   {queueSearchQuery && (
                     <button
                       type="button"
                       onClick={() => setQueueSearchQuery("")}
-                      className="absolute right-2.5 top-2 text-slate-400 hover:text-white text-xs"
+                      className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
                     >
-                      ✕
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
@@ -1560,39 +1743,41 @@ export default function CustomerOrdersTab({
                 <button
                   type="button"
                   onClick={() => setOnlyUrgentFilter((p) => !p)}
-                  className={`px-2.5 py-1.5 rounded-xl text-[10px] font-black border transition flex items-center gap-1 shrink-0 ${
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold border transition flex items-center gap-1 shrink-0 ${
                     onlyUrgentFilter
-                      ? "bg-rose-600/25 border-rose-500 text-rose-300"
-                      : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                      ? "bg-rose-600/20 border-rose-500/60 text-rose-300"
+                      : "bg-slate-950/60 border-white/[0.08] text-slate-400 hover:text-white"
                   }`}
                 >
                   <Flame className="w-3.5 h-3.5" />
-                  <span>🚨 Urgentes</span>
+                  <span>Urgentes</span>
                 </button>
               </div>
 
-              {/* Barra de ocupación de jornada */}
-              <div className="space-y-1.5 bg-slate-950/80 p-3 rounded-2xl border border-slate-800/80">
-                <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-slate-400 font-bold flex items-center gap-1.5">
+              <div className="space-y-1.5 bg-slate-950/55 p-3 rounded-xl border border-white/[0.06]">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 font-medium flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Carga Trabajo ({formatHoursMinutes(maxWorkdayMinutes)} máx.):</span>
+                    <span>
+                      Jornada ({formatHoursMinutes(maxWorkdayMinutes)} máx.)
+                    </span>
                   </span>
                   <span
-                    className={`font-black ${
+                    className={`font-bold tabular-nums ${
                       totalPendingMinutes > maxWorkdayMinutes
-                        ? "text-red-400"
+                        ? "text-rose-400"
                         : "text-amber-400"
                     }`}
                   >
-                    {totalPendingMinutes} / {maxWorkdayMinutes} min ({workdayOccupancyPercent}%)
+                    {totalPendingMinutes} / {maxWorkdayMinutes} min (
+                    {workdayOccupancyPercent}%)
                   </span>
                 </div>
-                <div className="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+                <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
                   <div
                     className={`h-full transition-all duration-300 ${
                       totalPendingMinutes > maxWorkdayMinutes
-                        ? "bg-red-500"
+                        ? "bg-rose-500"
                         : "bg-gradient-to-r from-amber-500 to-amber-400"
                     }`}
                     style={{
@@ -1600,26 +1785,20 @@ export default function CustomerOrdersTab({
                     }}
                   />
                 </div>
-                {totalPendingMinutes > maxWorkdayMinutes && (
-                  <p className="text-[10px] text-amber-300/90 flex items-center gap-1 font-medium">
-                    <AlertTriangle className="w-3 h-3 shrink-0 text-amber-400" />
-                    Supera 1 jornada: el Planificador dividirá en varios turnos.
-                  </p>
-                )}
               </div>
             </div>
 
             {filteredQueueOrders.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl space-y-1">
-                <p className="font-bold text-slate-400">
+              <div className="p-8 text-center text-slate-500 text-xs border border-dashed border-white/[0.08] rounded-2xl space-y-1">
+                <p className="font-semibold text-slate-300">
                   No hay avisos en esta vista
                 </p>
-                <p className="text-[11px]">
-                  Registra un nuevo parte en el formulario o cambia el filtro superior.
+                <p>
+                  Registra un parte en el formulario o cambia el filtro superior.
                 </p>
               </div>
             ) : (
-              <div className="space-y-3 max-h-[660px] overflow-y-auto pr-1">
+              <div className="space-y-3 max-h-[640px] overflow-y-auto pr-1">
                 {filteredQueueOrders.map((ord, i) => {
                   const isEditing = editingOrderId === ord.id;
                   const isCompleted = ord.status === "Completado";
@@ -1639,67 +1818,67 @@ export default function CustomerOrdersTab({
                       key={ord.id}
                       className={`p-4 rounded-2xl transition flex items-start justify-between gap-3 text-xs border ${
                         isEditing
-                          ? "bg-amber-500/10 border-amber-400 ring-2 ring-amber-400/80 shadow-lg"
+                          ? "bg-amber-500/10 border-amber-400"
                           : isUrgent && !isCompleted
-                          ? "bg-rose-950/20 border-rose-500/50 hover:border-rose-400"
+                          ? "bg-rose-950/20 border-rose-500/40"
                           : isInRoute
-                          ? "bg-sky-950/25 border-sky-500/50"
+                          ? "bg-sky-950/20 border-sky-500/40"
                           : isCompleted
-                          ? "bg-slate-900/60 border-slate-800 opacity-75"
-                          : "bg-slate-800/80 border-slate-700/80 hover:border-slate-600"
+                          ? "bg-slate-950/40 border-white/[0.05] opacity-70"
+                          : "bg-slate-950/55 border-white/[0.07] hover:border-white/[0.15]"
                       }`}
                     >
                       <div className="space-y-1.5 flex-1 min-w-0">
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="w-5 h-5 rounded-lg bg-slate-900 font-bold flex items-center justify-center text-[10px] text-slate-400 shrink-0">
+                          <span className="w-5 h-5 rounded-md bg-slate-800 font-bold flex items-center justify-center text-[11px] text-slate-300 shrink-0">
                             {i + 1}
                           </span>
-                          <span className="font-extrabold text-white text-sm truncate">
+                          <span className="font-bold text-white text-sm truncate">
                             {ord.customer.name}
                           </span>
                           <span
-                            className={`text-[10px] font-black px-2 py-0.5 rounded-full shrink-0 ${meta.badgeClass}`}
+                            className={`text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0 ${meta.badgeClass}`}
                           >
-                            {meta.emoji} {meta.label}
+                            {meta.label}
                           </span>
                           {isInRoute && (
-                            <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/40 shrink-0">
-                              🚐 En Ruta
+                            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300">
+                              En Ruta
                             </span>
                           )}
                           {isCompleted && (
-                            <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0">
-                              ✓ Cerrado
+                            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
+                              Cerrado
                             </span>
                           )}
                         </div>
 
-                        <div className="text-slate-300 text-[11px] flex items-center gap-1">
+                        <div className="text-slate-400 text-xs flex items-center gap-1">
                           <MapPin className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                          <span className="line-clamp-1">
+                          <span className="truncate">
                             {ord.customer.village}
                           </span>
                         </div>
 
                         {(ord.equipmentInfo || ord.customer.equipmentInfo) && (
-                          <div className="text-[11px] font-bold text-amber-300">
-                            ⚙️ {ord.equipmentInfo || ord.customer.equipmentInfo}
+                          <div className="text-xs font-medium text-amber-300">
+                            {ord.equipmentInfo || ord.customer.equipmentInfo}
                           </div>
                         )}
 
                         <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                          <span className="text-amber-400 font-black text-xs font-mono">
-                            ⏱️ {ord.actualMinutes ?? ord.estimatedMinutes} min
+                          <span className="text-amber-400 font-bold text-xs font-mono tabular-nums">
+                            {ord.actualMinutes ?? ord.estimatedMinutes} min
                           </span>
 
                           {!isCompleted && (
-                            <div className="flex items-center gap-1 bg-slate-950 rounded-lg p-0.5 border border-slate-700/80">
+                            <div className="flex items-center gap-1 bg-slate-900 rounded-lg p-0.5 border border-white/[0.06]">
                               <button
                                 type="button"
                                 onClick={() =>
                                   handleQuickDurationDelta(ord.id, -15)
                                 }
-                                className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+                                className="px-1.5 py-0.5 text-[11px] font-semibold rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
                               >
                                 -15m
                               </button>
@@ -1708,7 +1887,7 @@ export default function CustomerOrdersTab({
                                 onClick={() =>
                                   handleQuickDurationDelta(ord.id, +15)
                                 }
-                                className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-slate-800 hover:bg-slate-700 text-amber-300"
+                                className="px-1.5 py-0.5 text-[11px] font-semibold rounded bg-slate-800 hover:bg-slate-700 text-amber-300"
                               >
                                 +15m
                               </button>
@@ -1717,24 +1896,24 @@ export default function CustomerOrdersTab({
 
                           {ord.collectedPriceEur !== undefined &&
                           ord.collectedPriceEur > 0 ? (
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono text-[10px] font-black">
-                              💶 Cobrado: {ord.collectedPriceEur.toFixed(2)} €
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono text-[11px] font-bold tabular-nums">
+                              Cobrado: {ord.collectedPriceEur.toFixed(2)} €
                             </span>
                           ) : cashToCollectEur > 0 ? (
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 font-mono text-[10px] font-black">
-                              💶 Presup: {cashToCollectEur.toFixed(2)} €
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 font-mono text-[11px] font-semibold tabular-nums">
+                              Presup: {cashToCollectEur.toFixed(2)} €
                             </span>
                           ) : null}
                         </div>
 
                         {ord.technicalNotes && (
-                          <div className="text-[10px] text-amber-200/90 italic">
+                          <div className="text-xs text-slate-400 italic">
                             “{ord.technicalNotes}”
                           </div>
                         )}
                         {ord.resolutionNote && (
-                          <div className="text-[10px] text-emerald-300 font-bold">
-                            ✓ Cierre: {ord.resolutionNote}
+                          <div className="text-xs text-emerald-300 font-medium">
+                            Cierre: {ord.resolutionNote}
                           </div>
                         )}
                       </div>
@@ -1743,10 +1922,10 @@ export default function CustomerOrdersTab({
                         <button
                           type="button"
                           onClick={() => handleStartEdit(ord)}
-                          className={`p-2 rounded-xl transition flex items-center gap-1 font-bold ${
+                          className={`p-2 rounded-xl transition ${
                             isEditing
-                              ? "bg-amber-500 text-slate-950 font-black shadow"
-                              : "text-slate-400 hover:text-amber-400 hover:bg-slate-700"
+                              ? "bg-amber-500 text-slate-950"
+                              : "text-slate-400 hover:text-amber-400 hover:bg-slate-800"
                           }`}
                           title="Editar aviso"
                         >
@@ -1759,8 +1938,8 @@ export default function CustomerOrdersTab({
                             onClick={() =>
                               onUpdateOrderStatus(ord.id, "Pendiente")
                             }
-                            className="p-2 rounded-xl text-slate-400 hover:text-amber-400 hover:bg-slate-700 transition"
-                            title="Reabrir aviso a Pendiente"
+                            className="p-2 rounded-xl text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition"
+                            title="Reabrir aviso"
                           >
                             <RotateCcw className="w-4 h-4" />
                           </button>
@@ -1770,7 +1949,7 @@ export default function CustomerOrdersTab({
                             onClick={() =>
                               onUpdateOrderStatus(ord.id, "Completado")
                             }
-                            className="p-2 rounded-xl text-slate-400 hover:text-emerald-400 hover:bg-slate-700 transition"
+                            className="p-2 rounded-xl text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition"
                             title="Marcar cerrado"
                           >
                             <CheckCircle2 className="w-4 h-4" />
@@ -1783,7 +1962,7 @@ export default function CustomerOrdersTab({
                             if (editingOrderId === ord.id) resetForm();
                             onDeleteOrder(ord.id);
                           }}
-                          className="p-2 rounded-xl text-slate-400 hover:text-red-400 hover:bg-slate-700 transition"
+                          className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition"
                           title="Eliminar aviso"
                         >
                           <Trash2 className="w-4 h-4" />

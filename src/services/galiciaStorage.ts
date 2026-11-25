@@ -646,6 +646,62 @@ class LocalFieldServiceStorage {
     };
   }
 
+  /**
+   * Cierra un parte directamente desde la terminal del técnico cuando trabaja en Modo Local
+   * (mismo navegador), sincronizando al instante con el panel /admin.
+   */
+  completeOrderFromTech(
+    stopId: string,
+    data: {
+      actualMinutes: number;
+      collectedPriceEur: number;
+      resolutionNote?: string;
+      serviceType?: ServiceType;
+    }
+  ): boolean {
+    const cleanTargetId = stopId.replace(/^eph-/, "");
+    const allOrders = this.getOrders();
+    const idx = allOrders.findIndex(
+      (o) => o.id === cleanTargetId || o.id === stopId || o.id.endsWith(cleanTargetId)
+    );
+    if (idx === -1) return false;
+
+    const now = new Date().toISOString();
+    const current = allOrders[idx];
+    const safeMinutes = Math.max(5, Math.min(480, Math.round(data.actualMinutes || 45)));
+    const safePrice = Math.max(0, Number(data.collectedPriceEur) || 0);
+
+    const updatedOrder: ServiceOrder = {
+      ...current,
+      serviceType: data.serviceType ?? current.serviceType,
+      actualMinutes: safeMinutes,
+      collectedPriceEur: safePrice,
+      resolutionNote: data.resolutionNote?.trim() || current.resolutionNote,
+      status: "Completado",
+      completedAt: now,
+    };
+
+    allOrders[idx] = updatedOrder;
+    this.write(STORAGE_KEYS.ORDERS, allOrders);
+
+    const customers = this.getCustomers();
+    const custIdx = customers.findIndex((c) => c.id === current.customerId);
+    if (custIdx >= 0) {
+      customers[custIdx] = {
+        ...customers[custIdx],
+        lastServiceType: updatedOrder.serviceType,
+        lastInterventionMinutes: safeMinutes,
+        lastServiceDate: now,
+        totalBilledHistoryEur:
+          (customers[custIdx].totalBilledHistoryEur || 0) + safePrice,
+        updatedAt: now,
+      };
+      this.write(STORAGE_KEYS.CUSTOMERS, customers);
+    }
+
+    return true;
+  }
+
   // --- CONFIGURACIÓN ---
   getConfig(): TechnicianConfig {
     const raw = this.read<TechnicianConfig>(

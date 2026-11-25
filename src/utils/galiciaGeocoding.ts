@@ -31,12 +31,49 @@ export interface GoogleSearchResultItem {
 }
 
 /**
- * Consulta el endpoint /api/search-google-maps en el backend de Next.js.
- * Utiliza Google Places API si hay clave configurada o fallback automático rural de Galicia.
+ * Detecta si el texto introducido en el buscador ya es una coordenada directa,
+ * un enlace de Google Maps o un Plus Code, para resolverlo sin esperar búsqueda textual.
+ */
+export function detectDirectLocationInput(
+  text: string
+): "coords" | "maps_url" | "plus_code" | "text" {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return "text";
+
+  if (
+    /^https?:\/\/.*(maps\.app\.goo\.gl|goo\.gl\/maps|google\.[a-z.]+\/maps)/i.test(
+      trimmed
+    )
+  ) {
+    return "maps_url";
+  }
+
+  if (
+    extractGaliciaCoordinates(trimmed) ||
+    /\d{1,2}[\u00B0\u00BA]\s*\d{1,2}['\u2032]/.test(trimmed)
+  ) {
+    return "coords";
+  }
+
+  if (
+    /\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b/i.test(
+      trimmed
+    )
+  ) {
+    return "plus_code";
+  }
+
+  return "text";
+}
+
+/**
+ * Consulta el endpoint /api/search-google-maps con bias de proximidad y AbortSignal.
  */
 export async function searchGoogleMapsLive(
   query: string,
-  apiKey?: string
+  apiKey?: string,
+  biasCoords?: Coordinates,
+  signal?: AbortSignal
 ): Promise<GoogleSearchResultItem[]> {
   const trimmed = query.trim().slice(0, 120);
   if (!trimmed || trimmed.length < 2) return [];
@@ -46,9 +83,12 @@ export async function searchGoogleMapsLive(
     if (apiKey?.trim()) {
       headers["x-google-maps-key"] = apiKey.trim();
     }
+    const biasParams = biasCoords
+      ? `&lat=${biasCoords.lat.toFixed(5)}&lng=${biasCoords.lng.toFixed(5)}`
+      : "";
     const res = await fetch(
-      `/api/search-google-maps?q=${encodeURIComponent(trimmed)}`,
-      { headers }
+      `/api/search-google-maps?q=${encodeURIComponent(trimmed)}${biasParams}`,
+      { headers, signal }
     );
     if (!res.ok) return [];
     const data = await res.json();
@@ -56,7 +96,8 @@ export async function searchGoogleMapsLive(
       return data.results;
     }
     return [];
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === "AbortError") return [];
     console.error("Error en búsqueda Google Maps Live:", err);
     return [];
   }
