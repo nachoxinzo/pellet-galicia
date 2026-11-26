@@ -1394,15 +1394,21 @@ export default function RoutePlannerTab({
 
             {/* CABECERA IMPRIMIBLE CON QR */}
             <div className="flex items-start justify-between gap-4 border-b-2 border-slate-900 pb-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-xl font-black tracking-tight uppercase">
-                    SATRuta • Hoja de Ruta y Partes
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded bg-slate-900 text-white font-black text-xs">
-                    TURNO #{activeTrip.tripNumber}
-                  </span>
-                </div>
+              <div className="flex items-start gap-3">
+                <img
+                  src="/logo-gregorio.png"
+                  alt="Ferretería Gregorio"
+                  className="w-12 h-12 rounded-full object-cover shrink-0 border border-slate-300"
+                />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl font-black tracking-tight uppercase">
+                      Ferretería Gregorio • Hoja de Ruta y Partes
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded bg-slate-900 text-white font-black text-xs">
+                      TURNO #{activeTrip.tripNumber}
+                    </span>
+                  </div>
                 <p className="text-xs font-bold text-slate-700">
                   Fecha: {new Date().toLocaleDateString("es-ES")} • Salida:{" "}
                   {departureTime}h • Base: {config.warehouseName} (
@@ -1425,6 +1431,7 @@ export default function RoutePlannerTab({
                   <span>
                     🛣️ Distancia: <strong>{activeTrip.totalDistanceKm} km</strong>
                   </span>
+                </div>
                 </div>
               </div>
 

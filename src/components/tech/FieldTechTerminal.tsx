@@ -490,7 +490,12 @@ function TechTerminalContent() {
         )}
 
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src="/logo-gregorio.png"
+              alt="Ferretería Gregorio"
+              className="w-9 h-9 rounded-full object-cover shrink-0 shadow-md shadow-orange-500/20 ring-1 ring-orange-500/30"
+            />
             <div
               className={`w-2.5 h-2.5 rounded-full shrink-0 ${
                 isOnline
@@ -500,7 +505,7 @@ function TechTerminalContent() {
             />
             <div className="min-w-0">
               <h1 className="text-xs font-bold uppercase tracking-wider text-amber-400 truncate">
-                SATRuta · Técnico
+                F. Gregorio · Técnico
               </h1>
               {profile && (
                 <span className="text-[11px] text-slate-400 block truncate">

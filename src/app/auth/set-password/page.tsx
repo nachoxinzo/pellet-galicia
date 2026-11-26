@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
-  Wrench,
   Lock,
   ShieldCheck,
   Loader2,
@@ -153,12 +152,17 @@ function SetPasswordContent() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4 font-sans">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center space-y-3">
-          <div className="inline-flex p-3.5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 shadow-xl shadow-amber-500/20">
-            <Wrench className="w-7 h-7" />
-          </div>
+          <img
+            src="/logo-gregorio.png"
+            alt="Ferretería Gregorio"
+            className="w-20 h-20 rounded-full object-cover mx-auto shadow-xl shadow-orange-500/25 ring-2 ring-orange-500/30"
+          />
           <div>
             <h1 className="text-2xl font-black tracking-tight text-white">
-              SAT<span className="text-amber-400">Ruta</span>
+              Ferretería Gregorio{" "}
+              <span className="text-amber-400 text-lg font-extrabold">
+                · SATRuta
+              </span>
             </h1>
             <p className="text-xs text-slate-400 mt-1">
               Activación de cuenta y creación de contraseña

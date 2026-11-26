@@ -21,7 +21,6 @@ import CustomerOrdersTab from "@/components/admin/CustomerOrdersTab";
 import RoutePlannerTab from "@/components/admin/RoutePlannerTab";
 import ConfigBackupTab from "@/components/admin/ConfigBackupTab";
 import {
-  Wrench,
   ClipboardCheck,
   Route as RouteIcon,
   Settings,
@@ -428,9 +427,11 @@ export default function PelletGaliciaAdminDashboard() {
       {/* HEADER LIMPIO */}
       <header className="border-b border-white/[0.08] bg-slate-950/85 backdrop-blur-md sticky top-0 z-30 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3 print:hidden">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 shadow-lg shadow-amber-500/15">
-            <Wrench className="w-5 h-5" />
-          </div>
+          <img
+            src="/logo-gregorio.png"
+            alt="Ferretería Gregorio"
+            className="w-11 h-11 rounded-full object-cover shadow-lg shadow-orange-500/20 ring-1 ring-orange-500/30 shrink-0"
+          />
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-lg font-black tracking-tight text-white">
@@ -460,8 +461,8 @@ export default function PelletGaliciaAdminDashboard() {
             </div>
             <p className="text-xs text-slate-400">
               {currentProfile
-                ? `${currentProfile.fullName || currentProfile.email} · Coordinación`
-                : "Asistencia Técnica en Campo"}
+                ? `${currentProfile.fullName || currentProfile.email} · Ferretería Gregorio`
+                : "Ferretería Gregorio · Asistencia Técnica"}
             </p>
           </div>
         </div>

@@ -1,6 +1,5 @@
 import Link from "next/link";
 import {
-  Wrench,
   ShieldCheck,
   ArrowRight,
   Database,
@@ -14,12 +13,14 @@ export default function HomePage() {
       {/* Header */}
       <header className="max-w-5xl mx-auto w-full flex items-center justify-between py-4 border-b border-white/[0.08]">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950 font-black flex items-center justify-center shadow-lg shadow-amber-500/20">
-            <Wrench className="w-5 h-5" />
-          </div>
+          <img
+            src="/logo-gregorio.png"
+            alt="Ferretería Gregorio"
+            className="w-11 h-11 rounded-full object-cover shadow-lg shadow-orange-500/20 ring-1 ring-orange-500/30 shrink-0"
+          />
           <div>
             <span className="text-[10px] font-black uppercase tracking-widest text-amber-400 block">
-              Asistencia Técnica en Campo
+              Ferretería Gregorio · Asistencia Técnica
             </span>
             <h1 className="text-xl font-black text-white">SATRuta</h1>
           </div>

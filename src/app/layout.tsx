@@ -2,14 +2,18 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SATRuta | Gestión de Averías, Revisiones y Rutas en Campo",
+  title: "Ferretería Gregorio | SATRuta — Averías y Revisiones",
   description:
-    "Plataforma privada para coordinación de equipos técnicos, rutas OSRM por carretera y terminal móvil en campo con datos cifrados en la UE.",
+    "Plataforma privada de Ferretería Gregorio para coordinación de equipos técnicos, rutas OSRM por carretera y terminal móvil en campo.",
   manifest: "/manifest.json",
+  icons: {
+    icon: "/icon-192.png",
+    apple: "/apple-touch-icon.png",
+  },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#d97706",
+  themeColor: "#f97316",
   width: "device-width",
   initialScale: 1,
 };
