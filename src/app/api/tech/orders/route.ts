@@ -21,6 +21,7 @@ export async function GET() {
         "*, customer:customers(*), assigned_tech:profiles!service_orders_assigned_tech_id_fkey(id, full_name, email)"
       )
       .in("status", ["Pendiente", "En Ruta"])
+      .eq("needs_parts", false)
       .order("priority", { ascending: false })
       .order("created_at", { ascending: true }),
     auth.supabase.from("app_config").select("*").eq("id", 1).single(),

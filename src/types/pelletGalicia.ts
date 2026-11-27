@@ -104,6 +104,9 @@ export interface ServiceOrder {
   concello?: string;
   scheduledDate?: string | null; // YYYY-MM-DD
   timeSlot?: TimeSlot;
+  needsParts?: boolean;
+  partsNote?: string;
+  partsReportedAt?: string;
   status: ServiceStatus;
   dispatchedAt?: string;
   completedAt?: string;

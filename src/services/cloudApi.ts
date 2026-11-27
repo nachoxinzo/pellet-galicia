@@ -132,6 +132,8 @@ export const cloudApi = {
       technicalNotes?: string;
       scheduledDate?: string | null;
       timeSlot?: TimeSlot;
+      needsParts?: boolean;
+      partsNote?: string;
       status?: ServiceStatus;
     }
   ): Promise<ServiceOrder> {
@@ -329,6 +331,16 @@ export const cloudApi = {
       {
         method: "POST",
         body: JSON.stringify(payload),
+      }
+    );
+  },
+
+  async reportMissingParts(orderId: string, partsNote: string): Promise<void> {
+    await requestJson(
+      `/api/tech/orders/${encodeURIComponent(orderId)}/missing-parts`,
+      {
+        method: "POST",
+        body: JSON.stringify({ partsNote }),
       }
     );
   },

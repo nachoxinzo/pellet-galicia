@@ -46,6 +46,7 @@ import {
   Route as RouteIcon,
   Calendar,
   History,
+  PackageSearch,
 } from "lucide-react";
 
 function getLocalDateIso(offsetDays = 0): string {
@@ -137,6 +138,8 @@ interface CustomerOrdersTabProps {
       technicalNotes?: string;
       scheduledDate?: string | null;
       timeSlot?: TimeSlot;
+      needsParts?: boolean;
+      partsNote?: string;
       status?: ServiceOrder["status"];
     }
   ) => Promise<void> | void;
@@ -150,6 +153,8 @@ interface CustomerOrdersTabProps {
     id: string,
     status: ServiceOrder["status"]
   ) => Promise<void> | void;
+  requestedQueueFilter?: "ACTIVOS" | "REPUESTOS" | "Completado" | "ALL";
+  onConsumeRequestedFilter?: () => void;
   onNavigateToPlanner?: () => void;
 }
 
@@ -166,6 +171,8 @@ export default function CustomerOrdersTab({
   onUpdateOrderDuration,
   onDeleteOrder,
   onUpdateOrderStatus,
+  requestedQueueFilter,
+  onConsumeRequestedFilter,
   onNavigateToPlanner,
 }: CustomerOrdersTabProps) {
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null);
@@ -231,7 +238,7 @@ export default function CustomerOrdersTab({
 
   // Filtros de la Cola de Avisos
   const [queueStatusFilter, setQueueStatusFilter] = useState<
-    "ACTIVOS" | "Completado" | "ALL"
+    "ACTIVOS" | "REPUESTOS" | "Completado" | "ALL"
   >("ACTIVOS");
   const [queueAgendaFilter, setQueueAgendaFilter] = useState<
     "ALL" | "HOY" | "MANANA" | "FUTURO" | "SIN_FECHA"
@@ -239,6 +246,13 @@ export default function CustomerOrdersTab({
   const [queueSearchQuery, setQueueSearchQuery] = useState("");
   const [onlyUrgentFilter, setOnlyUrgentFilter] = useState(false);
   const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
+
+  useEffect(() => {
+    if (requestedQueueFilter) {
+      setQueueStatusFilter(requestedQueueFilter);
+      onConsumeRequestedFilter?.();
+    }
+  }, [requestedQueueFilter, onConsumeRequestedFilter]);
 
   // Buscador Google Maps Inteligente
   const [googleQuery, setGoogleQuery] = useState("");
@@ -783,7 +797,11 @@ export default function CustomerOrdersTab({
   };
 
   const pendingOrders = orders.filter(
-    (o) => o.status === "Pendiente" || o.status === "En Ruta"
+    (o) =>
+      (o.status === "Pendiente" || o.status === "En Ruta") && !o.needsParts
+  );
+  const missingPartsOrders = orders.filter(
+    (o) => (o.status === "Pendiente" || o.status === "En Ruta") && o.needsParts
   );
   const completedOrders = orders.filter((o) => o.status === "Completado");
   const totalPendingMinutes = pendingOrders.reduce(
@@ -802,8 +820,15 @@ export default function CustomerOrdersTab({
     return orders.filter((ord) => {
       if (
         queueStatusFilter === "ACTIVOS" &&
-        ord.status !== "Pendiente" &&
-        ord.status !== "En Ruta"
+        ((ord.status !== "Pendiente" && ord.status !== "En Ruta") ||
+          ord.needsParts)
+      ) {
+        return false;
+      }
+      if (
+        queueStatusFilter === "REPUESTOS" &&
+        (!ord.needsParts ||
+          (ord.status !== "Pendiente" && ord.status !== "En Ruta"))
       ) {
         return false;
       }
@@ -1869,7 +1894,7 @@ export default function CustomerOrdersTab({
                 </span>
               </div>
 
-              <div className="grid grid-cols-3 gap-1 bg-slate-950/70 p-1 rounded-xl border border-white/[0.06] text-xs font-semibold">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 bg-slate-950/70 p-1 rounded-xl border border-white/[0.06] text-xs font-semibold">
                 <button
                   type="button"
                   onClick={() => setQueueStatusFilter("ACTIVOS")}
@@ -1880,6 +1905,20 @@ export default function CustomerOrdersTab({
                   }`}
                 >
                   Activos ({pendingOrders.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQueueStatusFilter("REPUESTOS")}
+                  className={`py-1.5 px-2 rounded-lg transition flex items-center justify-center gap-1 ${
+                    queueStatusFilter === "REPUESTOS"
+                      ? "bg-orange-500 text-slate-950 font-bold"
+                      : missingPartsOrders.length > 0
+                      ? "text-orange-300 hover:text-orange-200"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <PackageSearch className="w-3.5 h-3.5 shrink-0" />
+                  <span>Piezas ({missingPartsOrders.length})</span>
                 </button>
                 <button
                   type="button"
@@ -2031,6 +2070,8 @@ export default function CustomerOrdersTab({
                       className={`p-4 rounded-2xl transition flex items-start justify-between gap-3 text-xs border ${
                         isEditing
                           ? "bg-amber-500/10 border-amber-400"
+                          : ord.needsParts && !isCompleted
+                          ? "bg-orange-950/25 border-orange-500/50"
                           : isUrgent && !isCompleted
                           ? "bg-rose-950/20 border-rose-500/40"
                           : isInRoute
@@ -2154,6 +2195,43 @@ export default function CustomerOrdersTab({
                         {ord.technicalNotes && (
                           <div className="text-xs text-slate-400 italic">
                             “{ord.technicalNotes}”
+                          </div>
+                        )}
+                        {ord.needsParts && !isCompleted && (
+                          <div className="p-2.5 rounded-xl bg-orange-500/15 border border-orange-500/35 space-y-2">
+                            <div className="flex items-start gap-1.5 text-orange-200">
+                              <PackageSearch className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
+                              <div>
+                                <strong className="text-orange-300 block">
+                                  Pieza solicitada por técnico:
+                                </strong>
+                                <span>
+                                  {ord.partsNote || "Sin detalle de repuesto"}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const noteTag = ord.partsNote
+                                  ? `[Repuesto listo: ${ord.partsNote}]`
+                                  : "[Repuesto listo en tienda]";
+                                const nextNotes = ord.technicalNotes
+                                  ? `${ord.technicalNotes} · ${noteTag}`
+                                  : noteTag;
+                                await onUpdateOrder(ord.id, {
+                                  needsParts: false,
+                                  status: "Pendiente",
+                                  technicalNotes: nextNotes,
+                                });
+                                setQuickOrderFeedback(
+                                  `Repuesto listo para ${ord.customer.name}. Aviso devuelto a la cola del técnico.`
+                                );
+                              }}
+                              className="w-full py-1.5 px-3 rounded-xl bg-orange-500 hover:bg-orange-400 text-slate-950 font-black text-xs transition"
+                            >
+                              Repuesto listo · Devolver a ruta
+                            </button>
                           </div>
                         )}
                         {ord.resolutionNote && (

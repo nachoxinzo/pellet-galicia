@@ -73,7 +73,17 @@ export const orderUpdateSchema = z.object({
     .nullable()
     .optional(),
   timeSlot: timeSlotSchema.optional(),
+  needsParts: z.boolean().optional(),
+  partsNote: z.string().trim().max(600).optional(),
   status: orderStatusSchema.optional(),
+});
+
+export const techMissingPartsSchema = z.object({
+  partsNote: z
+    .string()
+    .trim()
+    .min(2, "Indica qué pieza o repuesto falta")
+    .max(600),
 });
 
 export const techCompleteSchema = z.object({
@@ -135,6 +145,9 @@ export interface ServiceOrderDbRow {
   concello: string;
   scheduled_date?: string | null;
   time_slot?: string | null;
+  needs_parts?: boolean | null;
+  parts_note_enc?: string | null;
+  parts_reported_at?: string | null;
   status: string;
   dispatched_at: string | null;
   completed_at: string | null;
@@ -221,6 +234,9 @@ export function mapOrderRow(row: ServiceOrderDbRow): ServiceOrder | null {
     concello: row.concello || customer.village || "General",
     scheduledDate: row.scheduled_date || null,
     timeSlot: (row.time_slot as TimeSlot) || "Indiferente",
+    needsParts: Boolean(row.needs_parts),
+    partsNote: decryptField(row.parts_note_enc) || undefined,
+    partsReportedAt: row.parts_reported_at || undefined,
     status: (row.status as ServiceStatus) || "Pendiente",
     dispatchedAt: row.dispatched_at || undefined,
     completedAt: row.completed_at || undefined,

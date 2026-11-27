@@ -293,6 +293,15 @@ export default function CustomerHistoryModal({
                     </p>
                   )}
 
+                  {ord.needsParts && (
+                    <div className="p-2.5 rounded-xl bg-orange-500/12 border border-orange-500/35 text-orange-200 flex items-start gap-2">
+                      <span className="font-bold text-orange-300 shrink-0">
+                        Falta repuesto:
+                      </span>
+                      <span>{ord.partsNote || "En espera de material en tienda"}</span>
+                    </div>
+                  )}
+
                   {ord.resolutionNote && (
                     <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-200 flex items-start gap-2">
                       <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />

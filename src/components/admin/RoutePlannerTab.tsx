@@ -96,7 +96,18 @@ export default function RoutePlannerTab({
 }: RoutePlannerTabProps) {
   const pendingOrders = useMemo(
     () =>
-      orders.filter((o) => o.status === "Pendiente" || o.status === "En Ruta"),
+      orders.filter(
+        (o) =>
+          (o.status === "Pendiente" || o.status === "En Ruta") && !o.needsParts
+      ),
+    [orders]
+  );
+  const pausedForPartsCount = useMemo(
+    () =>
+      orders.filter(
+        (o) =>
+          (o.status === "Pendiente" || o.status === "En Ruta") && o.needsParts
+      ).length,
     [orders]
   );
 
@@ -901,6 +912,12 @@ export default function RoutePlannerTab({
                 {formatHoursMinutes(selectedInterventionMinutes)} trabajo)
               </span>
             </div>
+
+            {pausedForPartsCount > 0 && (
+              <div className="p-2 rounded-xl bg-orange-500/10 border border-orange-500/30 text-orange-300 text-[11px] font-semibold">
+                {pausedForPartsCount} aviso(s) pausados en tienda esperando repuesto.
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-1.5">
               <button

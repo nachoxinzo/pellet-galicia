@@ -110,6 +110,17 @@ export async function PATCH(
   if (updates.timeSlot !== undefined) {
     dbPatch.time_slot = updates.timeSlot;
   }
+  if (updates.needsParts !== undefined) {
+    dbPatch.needs_parts = updates.needsParts;
+    if (!updates.needsParts) {
+      dbPatch.parts_reported_at = null;
+    } else {
+      dbPatch.parts_reported_at = now;
+    }
+  }
+  if (updates.partsNote !== undefined) {
+    dbPatch.parts_note_enc = encryptField(updates.partsNote);
+  }
   if (updates.status !== undefined) {
     dbPatch.status = updates.status;
     if (updates.status === "Completado") {

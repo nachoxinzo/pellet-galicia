@@ -36,6 +36,7 @@ import {
   UploadCloud,
   HardDrive,
   Loader2,
+  PackageSearch,
 } from "lucide-react";
 
 type AdminActiveTab = "orders" | "planner" | "config";
@@ -59,6 +60,9 @@ export default function PelletGaliciaAdminDashboard() {
   );
 
   const [isLoaded, setIsLoaded] = useState(false);
+  const [requestedQueueFilter, setRequestedQueueFilter] = useState<
+    "ACTIVOS" | "REPUESTOS" | "Completado" | "ALL" | undefined
+  >(undefined);
   const [adminToast, setAdminToast] = useState<{
     text: string;
     type: "success" | "error";
@@ -252,6 +256,8 @@ export default function PelletGaliciaAdminDashboard() {
       technicalNotes?: string;
       scheduledDate?: string | null;
       timeSlot?: TimeSlot;
+      needsParts?: boolean;
+      partsNote?: string;
       status?: ServiceOrder["status"];
     }
   ) => {
@@ -360,7 +366,18 @@ export default function PelletGaliciaAdminDashboard() {
 
   const pendingOrders = useMemo(
     () =>
-      orders.filter((o) => o.status === "Pendiente" || o.status === "En Ruta"),
+      orders.filter(
+        (o) =>
+          (o.status === "Pendiente" || o.status === "En Ruta") && !o.needsParts
+      ),
+    [orders]
+  );
+  const missingPartsOrders = useMemo(
+    () =>
+      orders.filter(
+        (o) =>
+          (o.status === "Pendiente" || o.status === "En Ruta") && o.needsParts
+      ),
     [orders]
   );
   const completedOrders = useMemo(
@@ -546,6 +563,32 @@ export default function PelletGaliciaAdminDashboard() {
               </div>
             </div>
           )}
+
+        {/* AVISO DE REPUESTOS PENDIENTES SOLICITADOS DESDE CAMPO */}
+        {isLoaded && missingPartsOrders.length > 0 && (
+          <div className="p-4 rounded-2xl bg-orange-500/12 border border-orange-500/35 flex flex-wrap items-center justify-between gap-3 text-xs text-orange-100 print:hidden">
+            <div className="flex items-center gap-2.5">
+              <PackageSearch className="w-5 h-5 text-orange-400 shrink-0" />
+              <span>
+                <strong>
+                  {missingPartsOrders.length} aviso
+                  {missingPartsOrders.length === 1 ? "" : "s"} esperando repuesto en tienda:
+                </strong>{" "}
+                los técnicos solicitaron piezas para poder terminar la reparación.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("orders");
+                setRequestedQueueFilter("REPUESTOS");
+              }}
+              className="px-3.5 py-2 rounded-xl bg-orange-500 hover:bg-orange-400 text-slate-950 font-black text-xs transition"
+            >
+              Ver piezas pendientes ({missingPartsOrders.length})
+            </button>
+          </div>
+        )}
 
         {/* AVISO DE CUOTA AL 100% */}
         {isLoaded && storageStats?.is_blocked && (
@@ -736,6 +779,8 @@ export default function PelletGaliciaAdminDashboard() {
                 onUpdateOrderDuration={handleUpdateOrderDuration}
                 onDeleteOrder={handleDeleteOrder}
                 onUpdateOrderStatus={handleUpdateOrderStatus}
+                requestedQueueFilter={requestedQueueFilter}
+                onConsumeRequestedFilter={() => setRequestedQueueFilter(undefined)}
                 onNavigateToPlanner={() => setActiveTab("planner")}
               />
             )}

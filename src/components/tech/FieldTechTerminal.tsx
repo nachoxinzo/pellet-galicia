@@ -47,10 +47,12 @@ import {
   ArrowDown,
   ArrowUpCircle,
   Calendar,
+  PackageSearch,
 } from "lucide-react";
 
 const CLOUD_CACHE_KEY = "satruta_cloud_tech_cache_v1";
 const OFFLINE_QUEUE_KEY = "satruta_offline_queue_v1";
+const OFFLINE_PARTS_QUEUE_KEY = "satruta_offline_parts_queue_v1";
 const CUSTOM_ORDER_KEY = "satruta_tech_custom_order_v1";
 
 function getLocalDateIso(offsetDays = 0): string {
@@ -212,6 +214,35 @@ function writeOfflineQueue(items: QueuedCompletion[]): void {
   }
 }
 
+interface QueuedMissingParts {
+  orderId: string;
+  partsNote: string;
+  queuedAt: string;
+}
+
+function readOfflinePartsQueue(): QueuedMissingParts[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(OFFLINE_PARTS_QUEUE_KEY);
+    return raw ? (JSON.parse(raw) as QueuedMissingParts[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeOfflinePartsQueue(items: QueuedMissingParts[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (items.length === 0) {
+      localStorage.removeItem(OFFLINE_PARTS_QUEUE_KEY);
+    } else {
+      localStorage.setItem(OFFLINE_PARTS_QUEUE_KEY, JSON.stringify(items));
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function TechTerminalContent() {
   const [stops, setStops] = useState<EphemeralStop[]>([]);
   const [config, setConfig] = useState<TechnicianConfig>(DEFAULT_TECH_CONFIG);
@@ -240,12 +271,24 @@ function TechTerminalContent() {
   const [resolutionNoteInput, setResolutionNoteInput] = useState<string>("");
   const [isSubmittingClose, setIsSubmittingClose] = useState(false);
 
+  // Modal de Falta de Repuesto / Pieza en Tienda
+  const [partsStop, setPartsStop] = useState<EphemeralStop | null>(null);
+  const [partsNoteInput, setPartsNoteInput] = useState<string>("");
+  const [isSubmittingParts, setIsSubmittingParts] = useState(false);
+
   const syncOfflineQueue = useCallback(async () => {
     const currentQueue = readOfflineQueue();
-    if (currentQueue.length === 0 || !navigator.onLine) return;
+    const currentPartsQueue = readOfflinePartsQueue();
+    if (
+      (currentQueue.length === 0 && currentPartsQueue.length === 0) ||
+      !navigator.onLine
+    ) {
+      return;
+    }
 
     setIsSyncingQueue(true);
     const remaining: QueuedCompletion[] = [];
+    const remainingParts: QueuedMissingParts[] = [];
 
     for (const item of currentQueue) {
       try {
@@ -256,7 +299,6 @@ function TechTerminalContent() {
           serviceType: item.serviceType,
         });
       } catch (err) {
-        // Si es error de red, mantener en cola; si ya estaba cerrado (404/409), descartar
         const status =
           typeof err === "object" && err !== null && "status" in err
             ? (err as { status: number }).status
@@ -267,12 +309,27 @@ function TechTerminalContent() {
       }
     }
 
+    for (const pItem of currentPartsQueue) {
+      try {
+        await cloudApi.reportMissingParts(pItem.orderId, pItem.partsNote);
+      } catch (err) {
+        const status =
+          typeof err === "object" && err !== null && "status" in err
+            ? (err as { status: number }).status
+            : 0;
+        if (status !== 404 && status !== 409) {
+          remainingParts.push(pItem);
+        }
+      }
+    }
+
     writeOfflineQueue(remaining);
+    writeOfflinePartsQueue(remainingParts);
     setOfflineQueue(remaining);
     setIsSyncingQueue(false);
 
-    if (remaining.length === 0) {
-      setStatusNotice("Cierres offline sincronizados con la nube");
+    if (remaining.length === 0 && remainingParts.length === 0) {
+      setStatusNotice("Cierres y avisos de repuesto sincronizados");
       setTimeout(() => setStatusNotice(null), 3500);
     }
   }, []);
@@ -283,7 +340,10 @@ function TechTerminalContent() {
       await syncOfflineQueue();
 
       const res = await cloudApi.getTechOrders();
-      const queuedIds = new Set(readOfflineQueue().map((q) => q.orderId));
+      const queuedIds = new Set([
+        ...readOfflineQueue().map((q) => q.orderId),
+        ...readOfflinePartsQueue().map((q) => q.orderId),
+      ]);
       const mappedStops = applyCustomOrder(
         ordersToStops(res.orders.filter((o) => !queuedIds.has(o.id)))
       );
@@ -448,6 +508,9 @@ function TechTerminalContent() {
       sessionStorage.removeItem(CUSTOM_ORDER_KEY);
       if (readOfflineQueue().length === 0) {
         localStorage.removeItem(OFFLINE_QUEUE_KEY);
+      }
+      if (readOfflinePartsQueue().length === 0) {
+        localStorage.removeItem(OFFLINE_PARTS_QUEUE_KEY);
       }
     } catch {
       // ignore
@@ -1094,16 +1157,30 @@ function TechTerminalContent() {
                     <span>Parte Finalizado</span>
                   </button>
 
-                  {visibleStops.length > 1 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={handleSkipCurrentStop}
-                      className="w-full py-2.5 px-4 rounded-xl bg-slate-800/75 hover:bg-slate-800 text-slate-300 hover:text-amber-300 border border-white/[0.08] font-semibold text-xs flex items-center justify-center gap-2 transition"
+                      onClick={() => {
+                        setPartsStop(currentStop);
+                        setPartsNoteInput("");
+                      }}
+                      className="w-full py-2.5 px-3 rounded-xl bg-orange-500/15 hover:bg-orange-500/25 text-orange-300 border border-orange-500/35 font-bold text-xs flex items-center justify-center gap-2 transition"
                     >
-                      <SkipForward className="w-4 h-4 text-amber-400" />
-                      <span>Posponer y saltar a la siguiente parada</span>
+                      <PackageSearch className="w-4 h-4 text-orange-400 shrink-0" />
+                      <span>Falta repuesto / Pieza</span>
                     </button>
-                  )}
+
+                    {visibleStops.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={handleSkipCurrentStop}
+                        className="w-full py-2.5 px-3 rounded-xl bg-slate-800/75 hover:bg-slate-800 text-slate-300 hover:text-amber-300 border border-white/[0.08] font-semibold text-xs flex items-center justify-center gap-2 transition"
+                      >
+                        <SkipForward className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>Saltar parada</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })()}
@@ -1333,6 +1410,135 @@ function TechTerminalContent() {
                 className="w-2/3 min-h-[50px] rounded-2xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-sm shadow-lg shadow-emerald-600/25 transition active:scale-[0.98]"
               >
                 {isSubmittingClose ? "Guardando..." : "Confirmar Cierre"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL FALTA REPUESTO / PIEZA EN TIENDA */}
+      {partsStop && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4">
+          <div className="bg-slate-900 border border-orange-500/35 rounded-3xl max-w-sm w-full p-6 space-y-4 text-white shadow-2xl">
+            <div className="text-center space-y-1">
+              <div className="w-12 h-12 rounded-2xl bg-orange-500/15 border border-orange-500/30 text-orange-400 flex items-center justify-center mx-auto mb-2">
+                <PackageSearch className="w-6 h-6" />
+              </div>
+              <h3 className="text-lg font-bold text-white">
+                Solicitar Repuesto a Tienda
+              </h3>
+              <p className="text-xs text-slate-300">
+                <strong className="text-white">{partsStop.name}</strong> ·{" "}
+                {partsStop.equipmentInfo || partsStop.serviceType}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-semibold text-slate-300 block">
+                ¿Qué pieza o material hace falta? *
+              </label>
+              <textarea
+                rows={3}
+                maxLength={600}
+                placeholder="Ej. Bujía encendido 300W o latiguillo hidráulico 1/2 con codo 90°..."
+                value={partsNoteInput}
+                onChange={(e) => setPartsNoteInput(e.target.value)}
+                className="w-full px-3 py-2.5 rounded-xl bg-slate-950/70 border border-white/[0.1] text-white text-sm outline-none focus:border-orange-500"
+              />
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  "Bujía encendido pellet",
+                  "Sonda NTC",
+                  "Junta puerta/cristal",
+                  "Cable perimetral Stiga",
+                  "Latiguillo hidráulico",
+                  "Correa / Rodamiento",
+                ].map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() =>
+                      setPartsNoteInput((prev) =>
+                        prev.trim() ? `${prev.trim()} · ${chip}` : chip
+                      )
+                    }
+                    className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-medium text-orange-200 border border-white/[0.06]"
+                  >
+                    + {chip}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => setPartsStop(null)}
+                className="w-1/3 min-h-[48px] rounded-2xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isSubmittingParts || partsNoteInput.trim().length < 2}
+                onClick={async () => {
+                  if (!partsStop || partsNoteInput.trim().length < 2) return;
+                  setIsSubmittingParts(true);
+                  const noteText = partsNoteInput.trim();
+                  let sentToCloud = false;
+
+                  if (navigator.onLine) {
+                    try {
+                      await cloudApi.reportMissingParts(partsStop.id, noteText);
+                      sentToCloud = true;
+                    } catch (err) {
+                      const st =
+                        typeof err === "object" &&
+                        err !== null &&
+                        "status" in err
+                          ? (err as { status: number }).status
+                          : 0;
+                      if (st === 404 || st === 409) sentToCloud = true;
+                    }
+                  }
+
+                  if (!sentToCloud) {
+                    const nextParts = [
+                      ...readOfflinePartsQueue(),
+                      {
+                        orderId: partsStop.id,
+                        partsNote: noteText,
+                        queuedAt: new Date().toISOString(),
+                      },
+                    ];
+                    writeOfflinePartsQueue(nextParts);
+                  }
+
+                  const remaining = stops
+                    .filter((s) => s.id !== partsStop.id)
+                    .map((s, idx) => ({ ...s, seq: idx + 1 }));
+                  setStops(remaining);
+                  try {
+                    sessionStorage.setItem(
+                      CLOUD_CACHE_KEY,
+                      JSON.stringify({ stops: remaining, config, profile })
+                    );
+                  } catch {
+                    // ignore
+                  }
+
+                  setPartsStop(null);
+                  setIsSubmittingParts(false);
+                  setStatusNotice(
+                    sentToCloud
+                      ? "Aviso pasado a tienda (Falta repuesto)"
+                      : "Sin cobertura: solicitud de pieza guardada para sincronizar"
+                  );
+                  setTimeout(() => setStatusNotice(null), 4000);
+                }}
+                className="w-2/3 min-h-[48px] rounded-2xl bg-orange-500 hover:bg-orange-400 disabled:opacity-50 text-slate-950 font-black text-sm shadow-lg shadow-orange-500/20 transition"
+              >
+                {isSubmittingParts ? "Enviando..." : "Enviar a Tienda"}
               </button>
             </div>
           </div>
