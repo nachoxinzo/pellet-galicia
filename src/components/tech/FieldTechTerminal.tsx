@@ -42,10 +42,95 @@ import {
   LogOut,
   CloudUpload,
   Loader2,
+  SkipForward,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpCircle,
+  Calendar,
 } from "lucide-react";
 
 const CLOUD_CACHE_KEY = "satruta_cloud_tech_cache_v1";
 const OFFLINE_QUEUE_KEY = "satruta_offline_queue_v1";
+const CUSTOM_ORDER_KEY = "satruta_tech_custom_order_v1";
+
+function getLocalDateIso(offsetDays = 0): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function readCustomOrderIds(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = sessionStorage.getItem(CUSTOM_ORDER_KEY);
+    return raw ? (JSON.parse(raw) as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCustomOrderIds(ids: string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(CUSTOM_ORDER_KEY, JSON.stringify(ids));
+  } catch {
+    // ignore
+  }
+}
+
+function applyCustomOrder(items: EphemeralStop[]): EphemeralStop[] {
+  const savedIds = readCustomOrderIds();
+  if (savedIds.length === 0) return items;
+  const orderMap = new globalThis.Map<string, number>();
+  savedIds.forEach((id, idx) => orderMap.set(id, idx));
+
+  const sorted = [...items].sort((a, b) => {
+    const idxA = orderMap.get(a.id);
+    const idxB = orderMap.get(b.id);
+    if (idxA !== undefined && idxB !== undefined) return idxA - idxB;
+    if (idxA !== undefined) return -1;
+    if (idxB !== undefined) return 1;
+    return 0;
+  });
+
+  return sorted.map((s, idx) => ({ ...s, seq: idx + 1 }));
+}
+
+function formatStopScheduleLabel(
+  stop: EphemeralStop,
+  todayIso: string,
+  tomorrowIso: string
+): { label: string; isOverdue: boolean } | null {
+  const hasDate = Boolean(stop.scheduledDate);
+  const hasSlot = Boolean(stop.timeSlot && stop.timeSlot !== "Indiferente");
+  if (!hasDate && !hasSlot) return null;
+
+  let datePart = "";
+  let isOverdue = false;
+  if (stop.scheduledDate) {
+    if (stop.scheduledDate < todayIso) {
+      isOverdue = true;
+      datePart = `Atrasado (${new Date(
+        stop.scheduledDate + "T12:00:00"
+      ).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" })})`;
+    } else if (stop.scheduledDate === todayIso) {
+      datePart = "Hoy";
+    } else if (stop.scheduledDate === tomorrowIso) {
+      datePart = "Mañana";
+    } else {
+      datePart = new Date(
+        stop.scheduledDate + "T12:00:00"
+      ).toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" });
+    }
+  }
+
+  const slotPart = hasSlot ? stop.timeSlot! : "";
+  const label = [datePart, slotPart].filter(Boolean).join(" · ");
+  return { label, isOverdue };
+}
 
 interface QueuedCompletion {
   orderId: string;
@@ -83,6 +168,8 @@ function ordersToStops(orders: ServiceOrder[]): EphemeralStop[] {
       cashToCollectEur,
       tags: tags || undefined,
       phone: ord.customer.phone || undefined,
+      scheduledDate: ord.scheduledDate || null,
+      timeSlot: ord.timeSlot || "Indiferente",
     };
   });
 }
@@ -142,6 +229,7 @@ function TechTerminalContent() {
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const [copiedStopId, setCopiedStopId] = useState<string | null>(null);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [agendaTab, setAgendaTab] = useState<"today" | "upcoming">("today");
 
   // Modal de Cierre de Parte
   const [confirmingStop, setConfirmingStop] = useState<EphemeralStop | null>(
@@ -196,8 +284,8 @@ function TechTerminalContent() {
 
       const res = await cloudApi.getTechOrders();
       const queuedIds = new Set(readOfflineQueue().map((q) => q.orderId));
-      const mappedStops = ordersToStops(
-        res.orders.filter((o) => !queuedIds.has(o.id))
+      const mappedStops = applyCustomOrder(
+        ordersToStops(res.orders.filter((o) => !queuedIds.has(o.id)))
       );
 
       setStops(mappedStops);
@@ -357,6 +445,7 @@ function TechTerminalContent() {
   const handleLogout = async () => {
     try {
       sessionStorage.removeItem(CLOUD_CACHE_KEY);
+      sessionStorage.removeItem(CUSTOM_ORDER_KEY);
       if (readOfflineQueue().length === 0) {
         localStorage.removeItem(OFFLINE_QUEUE_KEY);
       }
@@ -394,17 +483,113 @@ function TechTerminalContent() {
     }
   };
 
+  const todayIso = getLocalDateIso(0);
+  const tomorrowIso = getLocalDateIso(1);
+
+  const todayStops = useMemo(
+    () =>
+      stops
+        .filter(
+          (s) =>
+            !s.scheduledDate ||
+            s.scheduledDate <= todayIso ||
+            s.priority === "Urgente"
+        )
+        .map((s, idx) => ({ ...s, seq: idx + 1 })),
+    [stops, todayIso]
+  );
+
+  const upcomingFutureStops = useMemo(
+    () =>
+      stops
+        .filter(
+          (s) =>
+            Boolean(s.scheduledDate) &&
+            s.scheduledDate! > todayIso &&
+            s.priority !== "Urgente"
+        )
+        .map((s, idx) => ({ ...s, seq: idx + 1 })),
+    [stops, todayIso]
+  );
+
+  const visibleStops =
+    agendaTab === "upcoming" && upcomingFutureStops.length > 0
+      ? upcomingFutureStops
+      : todayStops;
+
+  const applyVisibleReorder = useCallback(
+    (reorderedVisible: EphemeralStop[], noticeText: string) => {
+      const visibleIds = new Set(reorderedVisible.map((s) => s.id));
+      const otherStops = stops.filter((s) => !visibleIds.has(s.id));
+      const merged = (
+        agendaTab === "upcoming"
+          ? [...otherStops, ...reorderedVisible]
+          : [...reorderedVisible, ...otherStops]
+      ).map((s, idx) => ({ ...s, seq: idx + 1 }));
+
+      setStops(merged);
+      writeCustomOrderIds(merged.map((s) => s.id));
+      try {
+        sessionStorage.setItem(
+          CLOUD_CACHE_KEY,
+          JSON.stringify({ stops: merged, config, profile })
+        );
+      } catch {
+        // ignore
+      }
+      setStatusNotice(noticeText);
+      setTimeout(() => {
+        setStatusNotice((prev) => (prev === noticeText ? null : prev));
+      }, 2800);
+    },
+    [stops, agendaTab, config, profile]
+  );
+
+  const handleSkipCurrentStop = () => {
+    if (visibleStops.length <= 1) return;
+    const [first, ...rest] = visibleStops;
+    applyVisibleReorder(
+      [...rest, first],
+      `"${first.name}" pospuesto al final de la cola`
+    );
+  };
+
+  const handlePromoteStop = (stopId: string) => {
+    const target = visibleStops.find((s) => s.id === stopId);
+    if (!target || visibleStops[0]?.id === stopId) return;
+    const rest = visibleStops.filter((s) => s.id !== stopId);
+    applyVisibleReorder(
+      [target, ...rest],
+      `Siguiente parada: ${target.name}`
+    );
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
+
+  const handleMoveStop = (stopId: string, direction: "up" | "down") => {
+    const idx = visibleStops.findIndex((s) => s.id === stopId);
+    if (idx === -1) return;
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= visibleStops.length) return;
+    const copy = [...visibleStops];
+    const tmp = copy[idx];
+    copy[idx] = copy[swapIdx];
+    copy[swapIdx] = tmp;
+    applyVisibleReorder(copy, "Orden de ruta actualizado");
+  };
+
   const multiStopGoogleMapsUrl = useMemo(() => {
-    if (stops.length === 0) return "";
+    if (visibleStops.length === 0) return "";
     const wh = config.warehouseCoordinates;
     const warehouseStr = `${wh.lat.toFixed(6)},${wh.lng.toFixed(6)}`;
 
-    if (stops.length === 1) {
-      const stop = stops[0];
+    if (visibleStops.length === 1) {
+      const stop = visibleStops[0];
       return `https://www.google.com/maps/dir/?api=1&destination=${stop.lat.toFixed(6)},${stop.lng.toFixed(6)}&travelmode=driving`;
     }
 
-    const waypoints = stops
+    const waypoints = visibleStops
       .slice(0, 9)
       .map((s) => `${s.lat.toFixed(6)},${s.lng.toFixed(6)}`)
       .join("|");
@@ -412,7 +597,7 @@ function TechTerminalContent() {
     return `https://www.google.com/maps/dir/?api=1&destination=${warehouseStr}&waypoints=${encodeURIComponent(
       waypoints
     )}&travelmode=driving`;
-  }, [config, stops]);
+  }, [config, visibleStops]);
 
   const handleOpenMultiStopRoute = () => {
     if (multiStopGoogleMapsUrl) {
@@ -426,13 +611,13 @@ function TechTerminalContent() {
     window.open(url, "_blank");
   };
 
-  const currentStop = stops[0] || null;
-  const upcomingStops = stops.slice(1);
-  const totalRemainingMinutes = stops.reduce(
+  const currentStop = visibleStops[0] || null;
+  const upcomingStops = visibleStops.slice(1);
+  const totalRemainingMinutes = visibleStops.reduce(
     (sum, s) => sum + (s.estimatedMinutes || 45),
     0
   );
-  const totalTripStops = stats.completedCount + stops.length;
+  const totalTripStops = stats.completedCount + visibleStops.length;
   const completedPercent =
     totalTripStops > 0
       ? Math.round((stats.completedCount / totalTripStops) * 100)
@@ -573,22 +758,52 @@ function TechTerminalContent() {
           </div>
         )}
 
+        {/* SELECTOR AGENDA: HOY vs PRÓXIMOS DÍAS */}
+        {upcomingFutureStops.length > 0 && (
+          <div className="grid grid-cols-2 gap-1.5 bg-slate-900/75 p-1 rounded-xl border border-white/[0.08] text-xs font-bold">
+            <button
+              type="button"
+              onClick={() => setAgendaTab("today")}
+              className={`py-1.5 px-3 rounded-lg transition ${
+                agendaTab === "today"
+                  ? "bg-amber-500 text-slate-950"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              Hoy / Urgentes ({todayStops.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setAgendaTab("upcoming")}
+              className={`py-1.5 px-3 rounded-lg transition ${
+                agendaTab === "upcoming"
+                  ? "bg-sky-500 text-slate-950"
+                  : "text-slate-300 hover:text-white"
+              }`}
+            >
+              Próximos días ({upcomingFutureStops.length})
+            </button>
+          </div>
+        )}
+
         {/* BOTÓN RUTA COMPLETA GOOGLE MAPS */}
-        {stops.length > 0 && (
+        {visibleStops.length > 0 && (
           <button
             type="button"
             onClick={handleOpenMultiStopRoute}
             className="w-full min-h-[50px] flex items-center justify-center gap-2.5 py-2.5 px-4 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-sm shadow-lg shadow-sky-900/30 active:scale-[0.98] transition"
           >
             <Map className="w-5 h-5 shrink-0" />
-            <span>Abrir Ruta Completa en Google Maps ({stops.length})</span>
+            <span>
+              Abrir Ruta Completa en Google Maps ({visibleStops.length})
+            </span>
           </button>
         )}
       </header>
 
       {/* CONTENIDO PRINCIPAL */}
       <main className="flex-1 p-4 space-y-4">
-        {stops.length === 0 ? (
+        {visibleStops.length === 0 ? (
           <div className="bg-slate-900/65 backdrop-blur-md border border-white/[0.08] rounded-3xl p-6 sm:p-7 text-center space-y-5 shadow-2xl my-auto">
             <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/25 text-emerald-400 flex items-center justify-center mx-auto">
               <CheckCircle2 className="w-8 h-8" />
@@ -638,6 +853,19 @@ function TechTerminalContent() {
             )}
 
             <div className="flex flex-col gap-2.5 pt-1">
+              {agendaTab === "today" && upcomingFutureStops.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAgendaTab("upcoming")}
+                  className="w-full min-h-[50px] flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-sm transition"
+                >
+                  <Calendar className="w-4 h-4" />
+                  <span>
+                    Ver {upcomingFutureStops.length} avisos de próximos días
+                  </span>
+                </button>
+              )}
+
               <button
                 type="button"
                 disabled={isRefreshing || !isOnline}
@@ -679,6 +907,11 @@ function TechTerminalContent() {
                 currentStop.priority
               );
               const isUrgent = currentStop.priority === "Urgente";
+              const schedMeta = formatStopScheduleLabel(
+                currentStop,
+                todayIso,
+                tomorrowIso
+              );
               return (
                 <div
                   className={`bg-slate-900/75 backdrop-blur-md rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 relative overflow-hidden border ${
@@ -705,9 +938,23 @@ function TechTerminalContent() {
                         #{currentStop.seq}
                       </div>
                       <div>
-                        <span className="text-xs font-semibold text-amber-400 block">
-                          Intervención actual
-                        </span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-semibold text-amber-400">
+                            Intervención actual
+                          </span>
+                          {schedMeta && (
+                            <span
+                              className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                                schedMeta.isOverdue
+                                  ? "bg-rose-500/20 text-rose-300"
+                                  : "bg-sky-500/15 text-sky-300"
+                              }`}
+                            >
+                              <Calendar className="w-3 h-3" />
+                              {schedMeta.label}
+                            </span>
+                          )}
+                        </div>
                         <h2 className="text-xl sm:text-2xl font-black text-white leading-tight">
                           {currentStop.name}
                         </h2>
@@ -846,6 +1093,17 @@ function TechTerminalContent() {
                     <CheckCircle2 className="w-6 h-6 shrink-0" />
                     <span>Parte Finalizado</span>
                   </button>
+
+                  {visibleStops.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={handleSkipCurrentStop}
+                      className="w-full py-2.5 px-4 rounded-xl bg-slate-800/75 hover:bg-slate-800 text-slate-300 hover:text-amber-300 border border-white/[0.08] font-semibold text-xs flex items-center justify-center gap-2 transition"
+                    >
+                      <SkipForward className="w-4 h-4 text-amber-400" />
+                      <span>Posponer y saltar a la siguiente parada</span>
+                    </button>
+                  )}
                 </div>
               );
             })()}
@@ -859,66 +1117,121 @@ function TechTerminalContent() {
                 </div>
 
                 <div className="space-y-2.5">
-                  {upcomingStops.map((stop) => {
+                  {upcomingStops.map((stop, upcomingIdx) => {
                     const meta = getServiceTypeBadgeMeta(
                       stop.serviceType,
                       stop.priority
                     );
+                    const schedMeta = formatStopScheduleLabel(
+                      stop,
+                      todayIso,
+                      tomorrowIso
+                    );
+                    const isLastUpcoming =
+                      upcomingIdx === upcomingStops.length - 1;
                     return (
                       <div
                         key={stop.id}
-                        className="bg-slate-900/65 border border-white/[0.07] rounded-2xl p-4 flex items-center justify-between gap-3 text-xs"
+                        className="bg-slate-900/65 border border-white/[0.07] rounded-2xl p-4 space-y-3 text-xs"
                       >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-8 h-8 rounded-xl bg-slate-800 text-slate-300 font-bold text-xs flex items-center justify-center shrink-0">
-                            #{stop.seq}
-                          </div>
-                          <div className="min-w-0 space-y-0.5">
-                            <div className="font-bold text-white text-sm truncate flex items-center gap-2">
-                              <span className="truncate">{stop.name}</span>
-                              <span
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${meta.badgeClass}`}
-                              >
-                                <ServiceTypeIcon
-                                  serviceType={stop.serviceType}
-                                  priority={stop.priority}
-                                  className="w-3 h-3"
-                                />
-                              </span>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-8 h-8 rounded-xl bg-slate-800 text-slate-300 font-bold text-xs flex items-center justify-center shrink-0">
+                              #{stop.seq}
                             </div>
-                            <p className="text-xs text-slate-400 line-clamp-1">
-                              {stop.village}
-                            </p>
-                            {stop.equipmentInfo && (
-                              <span className="text-xs text-amber-300/90 block truncate">
-                                {stop.equipmentInfo}
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="font-bold text-white text-sm truncate flex items-center gap-2">
+                                <span className="truncate">{stop.name}</span>
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${meta.badgeClass}`}
+                                >
+                                  <ServiceTypeIcon
+                                    serviceType={stop.serviceType}
+                                    priority={stop.priority}
+                                    className="w-3 h-3"
+                                  />
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-400 line-clamp-1">
+                                {stop.village}
+                              </p>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {stop.equipmentInfo && (
+                                  <span className="text-xs text-amber-300/90 truncate">
+                                    {stop.equipmentInfo}
+                                  </span>
+                                )}
+                                {schedMeta && (
+                                  <span
+                                    className={`inline-flex items-center gap-1 text-[11px] font-semibold ${
+                                      schedMeta.isOverdue
+                                        ? "text-rose-300"
+                                        : "text-sky-300"
+                                    }`}
+                                  >
+                                    <Calendar className="w-3 h-3" />
+                                    {schedMeta.label}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleCopyGps(stop)}
+                              className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/[0.08] text-xs font-semibold text-slate-300 flex items-center gap-1"
+                            >
+                              <Copy className="w-3 h-3" />
+                              <span>
+                                {copiedStopId === stop.id ? "OK" : "GPS"}
                               </span>
-                            )}
+                            </button>
+
+                            <div className="text-right tabular-nums">
+                              <span className="font-mono font-bold text-amber-400 text-xs block">
+                                {stop.estimatedMinutes}m
+                              </span>
+                              {stop.cashToCollectEur &&
+                              stop.cashToCollectEur > 0 ? (
+                                <span className="text-xs text-emerald-400 font-mono font-semibold">
+                                  {stop.cashToCollectEur} €
+                                </span>
+                              ) : null}
+                            </div>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2.5 shrink-0">
+                        {/* CONTROLES DE REORDENACIÓN EN MARCHA */}
+                        <div className="flex items-center justify-between gap-2 pt-2 border-t border-white/[0.06]">
                           <button
                             type="button"
-                            onClick={() => handleCopyGps(stop)}
-                            className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/[0.08] text-xs font-semibold text-slate-300 flex items-center gap-1"
+                            onClick={() => handlePromoteStop(stop.id)}
+                            className="flex-1 py-1.5 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition"
                           >
-                            <Copy className="w-3 h-3" />
-                            <span>
-                              {copiedStopId === stop.id ? "OK" : "GPS"}
-                            </span>
+                            <ArrowUpCircle className="w-3.5 h-3.5" />
+                            <span>Ir a este aviso ahora</span>
                           </button>
 
-                          <div className="text-right tabular-nums">
-                            <span className="font-mono font-bold text-amber-400 text-xs block">
-                              {stop.estimatedMinutes}m
-                            </span>
-                            {stop.cashToCollectEur &&
-                            stop.cashToCollectEur > 0 ? (
-                              <span className="text-xs text-emerald-400 font-mono font-semibold">
-                                {stop.cashToCollectEur} €
-                              </span>
-                            ) : null}
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleMoveStop(stop.id, "up")}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-white/[0.08]"
+                              title="Subir una posición"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isLastUpcoming}
+                              onClick={() => handleMoveStop(stop.id, "down")}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-35 text-slate-300 border border-white/[0.08]"
+                              title="Bajar una posición"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </div>
                       </div>

@@ -6,6 +6,7 @@ import {
   ServiceOrder,
   ServiceType,
   OrderPriority,
+  TimeSlot,
   DecodedReturnReceipt,
   TechnicianConfig,
   UserProfile,
@@ -226,6 +227,8 @@ export default function PelletGaliciaAdminDashboard() {
       estimatedMinutes?: number;
       estimatedPriceEur?: number;
       technicalNotes?: string;
+      scheduledDate?: string | null;
+      timeSlot?: TimeSlot;
     }
   ) => {
     try {
@@ -247,6 +250,8 @@ export default function PelletGaliciaAdminDashboard() {
       estimatedMinutes?: number;
       estimatedPriceEur?: number;
       technicalNotes?: string;
+      scheduledDate?: string | null;
+      timeSlot?: TimeSlot;
       status?: ServiceOrder["status"];
     }
   ) => {

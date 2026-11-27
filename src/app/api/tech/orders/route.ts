@@ -37,11 +37,22 @@ export async function GET() {
     .map(mapOrderRow)
     .filter((o): o is NonNullable<typeof o> => o !== null);
 
-  // Priorizar Urgentes arriba del turno
+  // Priorizar: 1) Urgentes, 2) Fecha programada (atrasados/hoy/sin fecha primero), 3) Franja horaria (Mañana -> Indiferente -> Tarde)
+  const slotWeight = (slot?: string) =>
+    slot === "Mañana" ? 0 : slot === "Indiferente" || !slot ? 1 : 2;
+
   orders.sort((a, b) => {
     if (a.priority === "Urgente" && b.priority !== "Urgente") return -1;
     if (a.priority !== "Urgente" && b.priority === "Urgente") return 1;
-    return 0;
+
+    const dateA = a.scheduledDate || "9999-12-31";
+    const dateB = b.scheduledDate || "9999-12-31";
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
+
+    const slotDiff = slotWeight(a.timeSlot) - slotWeight(b.timeSlot);
+    if (slotDiff !== 0) return slotDiff;
+
+    return a.createdAt.localeCompare(b.createdAt);
   });
 
   const config = cfgRes.data

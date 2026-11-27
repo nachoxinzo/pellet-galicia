@@ -110,6 +110,8 @@ export async function POST(req: NextRequest) {
       technical_notes_enc: encryptField(resolvedNotes),
       resolution_note_enc: "",
       concello: extractConcelloFromVillage(existingCust.village),
+      scheduled_date: input.scheduledDate ?? null,
+      time_slot: input.timeSlot ?? "Indiferente",
       status: "Pendiente",
       created_by: auth.profile.id,
       updated_at: now,

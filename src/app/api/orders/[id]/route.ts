@@ -104,6 +104,12 @@ export async function PATCH(
   } else if (cashToCollectEur > 0) {
     dbPatch.estimated_price_eur = cashToCollectEur;
   }
+  if (updates.scheduledDate !== undefined) {
+    dbPatch.scheduled_date = updates.scheduledDate;
+  }
+  if (updates.timeSlot !== undefined) {
+    dbPatch.time_slot = updates.timeSlot;
+  }
   if (updates.status !== undefined) {
     dbPatch.status = updates.status;
     if (updates.status === "Completado") {

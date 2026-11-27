@@ -7,10 +7,12 @@ import {
   ServiceOrder,
   ServiceType,
   OrderPriority,
+  TimeSlot,
   TechnicianConfig,
   UserProfile,
   FIELD_SERVICE_RULES,
 } from "@/types/pelletGalicia";
+import CustomerHistoryModal from "@/components/admin/CustomerHistoryModal";
 import {
   Wrench,
   ClipboardCheck,
@@ -42,7 +44,18 @@ import {
   Home,
   ExternalLink,
   Route as RouteIcon,
+  Calendar,
+  History,
 } from "lucide-react";
+
+function getLocalDateIso(offsetDays = 0): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 import {
   searchGoogleMapsLive,
   reverseGeocodeGalicia,
@@ -108,6 +121,8 @@ interface CustomerOrdersTabProps {
       estimatedMinutes?: number;
       estimatedPriceEur?: number;
       technicalNotes?: string;
+      scheduledDate?: string | null;
+      timeSlot?: TimeSlot;
     }
   ) => Promise<void> | void;
   onUpdateOrder: (
@@ -120,6 +135,8 @@ interface CustomerOrdersTabProps {
       estimatedMinutes?: number;
       estimatedPriceEur?: number;
       technicalNotes?: string;
+      scheduledDate?: string | null;
+      timeSlot?: TimeSlot;
       status?: ServiceOrder["status"];
     }
   ) => Promise<void> | void;
@@ -206,14 +223,22 @@ export default function CustomerOrdersTab({
   const [estimatedPriceEur, setEstimatedPriceEur] = useState<string>("");
   const [technicalNotes, setTechnicalNotes] = useState("");
   const [assignedTechId, setAssignedTechId] = useState<string | null>(null);
+  const [scheduledDate, setScheduledDate] = useState<string>(() =>
+    getLocalDateIso(0)
+  );
+  const [timeSlot, setTimeSlot] = useState<TimeSlot>("Indiferente");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Filtros de la Cola de Avisos
   const [queueStatusFilter, setQueueStatusFilter] = useState<
     "ACTIVOS" | "Completado" | "ALL"
   >("ACTIVOS");
+  const [queueAgendaFilter, setQueueAgendaFilter] = useState<
+    "ALL" | "HOY" | "MANANA" | "FUTURO" | "SIN_FECHA"
+  >("ALL");
   const [queueSearchQuery, setQueueSearchQuery] = useState("");
   const [onlyUrgentFilter, setOnlyUrgentFilter] = useState(false);
+  const [historyCustomer, setHistoryCustomer] = useState<Customer | null>(null);
 
   // Buscador Google Maps Inteligente
   const [googleQuery, setGoogleQuery] = useState("");
@@ -565,6 +590,8 @@ export default function CustomerOrdersTab({
         equipmentInfo: c.equipmentInfo,
         estimatedMinutes: targetMinutes,
         technicalNotes: c.internalNotes || "",
+        scheduledDate: getLocalDateIso(0),
+        timeSlot: "Indiferente",
       });
       setShowCustomerDropdown(false);
 
@@ -616,6 +643,8 @@ export default function CustomerOrdersTab({
     setEstimatedPriceEur("");
     setTechnicalNotes("");
     setAssignedTechId(null);
+    setScheduledDate(getLocalDateIso(0));
+    setTimeSlot("Indiferente");
     setGoogleQuery("");
     setGoogleResults([]);
     setHasSearchedOnce(false);
@@ -647,6 +676,8 @@ export default function CustomerOrdersTab({
     );
     setTechnicalNotes(ord.technicalNotes || "");
     setAssignedTechId(ord.assignedTechId || null);
+    setScheduledDate(ord.scheduledDate || "");
+    setTimeSlot(ord.timeSlot || "Indiferente");
     setGoogleQuery("");
     setShowGoogleDropdown(false);
     setShowCustomerDropdown(false);
@@ -712,6 +743,8 @@ export default function CustomerOrdersTab({
           estimatedMinutes,
           estimatedPriceEur: parsedPrice,
           technicalNotes: combinedNotes,
+          scheduledDate: scheduledDate.trim() || null,
+          timeSlot,
         });
         const msg = `Cambios guardados en la nube: ${serviceType} para ${name} (${estimatedMinutes} min)`;
         setQuickOrderFeedback(msg);
@@ -728,6 +761,8 @@ export default function CustomerOrdersTab({
           estimatedMinutes,
           estimatedPriceEur: parsedPrice,
           technicalNotes: combinedNotes,
+          scheduledDate: scheduledDate.trim() || null,
+          timeSlot,
         });
         const msg = `Parte guardado en la nube: ${serviceType} para ${name} (${estimatedMinutes} min)`;
         setQuickOrderFeedback(msg);
@@ -759,6 +794,9 @@ export default function CustomerOrdersTab({
     (totalPendingMinutes / Math.max(1, maxWorkdayMinutes)) * 100
   );
 
+  const todayIso = getLocalDateIso(0);
+  const tomorrowIso = getLocalDateIso(1);
+
   const filteredQueueOrders = useMemo(() => {
     const q = normalizeGaliciaText(queueSearchQuery);
     return orders.filter((ord) => {
@@ -771,6 +809,15 @@ export default function CustomerOrdersTab({
       }
       if (queueStatusFilter === "Completado" && ord.status !== "Completado") {
         return false;
+      }
+      if (queueAgendaFilter === "HOY") {
+        if (ord.scheduledDate && ord.scheduledDate > todayIso) return false;
+      } else if (queueAgendaFilter === "MANANA") {
+        if (ord.scheduledDate !== tomorrowIso) return false;
+      } else if (queueAgendaFilter === "FUTURO") {
+        if (!ord.scheduledDate || ord.scheduledDate <= tomorrowIso) return false;
+      } else if (queueAgendaFilter === "SIN_FECHA") {
+        if (ord.scheduledDate) return false;
       }
       if (onlyUrgentFilter && ord.priority !== "Urgente") {
         return false;
@@ -789,7 +836,15 @@ export default function CustomerOrdersTab({
       }
       return true;
     });
-  }, [orders, queueStatusFilter, queueSearchQuery, onlyUrgentFilter]);
+  }, [
+    orders,
+    queueStatusFilter,
+    queueAgendaFilter,
+    queueSearchQuery,
+    onlyUrgentFilter,
+    todayIso,
+    tomorrowIso,
+  ]);
 
   const handleAppendNoteChip = (chipText: string) => {
     setTechnicalNotes((prev) => {
@@ -1066,6 +1121,14 @@ export default function CustomerOrdersTab({
                         </button>
                         <button
                           type="button"
+                          onClick={() => setHistoryCustomer(c)}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300"
+                          title="Ver historial completo"
+                        >
+                          <History className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => {
                             selectExistingCustomer(c);
                             setShowHabitualDrawer(false);
@@ -1290,6 +1353,14 @@ export default function CustomerOrdersTab({
                             </button>
                             <button
                               type="button"
+                              onClick={() => setHistoryCustomer(c)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300"
+                              title="Ver historial completo"
+                            >
+                              <History className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => selectExistingCustomer(c)}
                               className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs"
                             >
@@ -1347,6 +1418,78 @@ export default function CustomerOrdersTab({
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* AGENDA: FECHA Y FRANJA HORARIA */}
+              <div className="p-3.5 rounded-2xl bg-slate-950/55 border border-white/[0.07] space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Fecha y franja prevista</span>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setScheduledDate(getLocalDateIso(0))}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                        scheduledDate === todayIso
+                          ? "bg-amber-500 text-slate-950"
+                          : "bg-slate-800 text-slate-300 hover:text-white"
+                      }`}
+                    >
+                      Hoy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScheduledDate(getLocalDateIso(1))}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                        scheduledDate === tomorrowIso
+                          ? "bg-sky-500 text-slate-950"
+                          : "bg-slate-800 text-slate-300 hover:text-white"
+                      }`}
+                    >
+                      Mañana
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setScheduledDate("")}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition ${
+                        scheduledDate === ""
+                          ? "bg-slate-700 text-white"
+                          : "bg-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      Sin fecha
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <input
+                    type="date"
+                    value={scheduledDate}
+                    onChange={(e) => setScheduledDate(e.target.value)}
+                    className="h-10 px-3 text-xs bg-slate-900 border border-white/[0.08] rounded-xl text-white font-semibold outline-none focus:border-amber-500"
+                  />
+                  <div className="grid grid-cols-3 gap-1 bg-slate-900 p-1 rounded-xl border border-white/[0.08]">
+                    {(["Mañana", "Tarde", "Indiferente"] as TimeSlot[]).map(
+                      (slot) => (
+                        <button
+                          key={slot}
+                          type="button"
+                          onClick={() => setTimeSlot(slot)}
+                          className={`rounded-lg text-[11px] font-bold transition py-1.5 ${
+                            timeSlot === slot
+                              ? "bg-amber-500 text-slate-950"
+                              : "text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          {slot === "Indiferente" ? "Flexible" : slot}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -1797,6 +1940,32 @@ export default function CustomerOrdersTab({
                 </button>
               </div>
 
+              {/* FILTRO DE AGENDA EN LA COLA */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(
+                  [
+                    { key: "ALL", label: "Todas fechas" },
+                    { key: "HOY", label: "Hoy / Atrasados" },
+                    { key: "MANANA", label: "Mañana" },
+                    { key: "FUTURO", label: "Próximos días" },
+                    { key: "SIN_FECHA", label: "Sin fecha" },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setQueueAgendaFilter(item.key)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition border ${
+                      queueAgendaFilter === item.key
+                        ? "bg-sky-500/20 border-sky-400/50 text-sky-300"
+                        : "bg-slate-950/40 border-white/[0.06] text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
               <div className="space-y-1.5 bg-slate-950/55 p-3 rounded-xl border border-white/[0.06]">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400 font-medium flex items-center gap-1.5">
@@ -1899,6 +2068,34 @@ export default function CustomerOrdersTab({
                               {ord.assignedTechName}
                             </span>
                           )}
+                          {(ord.scheduledDate || (ord.timeSlot && ord.timeSlot !== "Indiferente")) && (
+                            <span
+                              className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
+                                !isCompleted && ord.scheduledDate && ord.scheduledDate < todayIso
+                                  ? "bg-rose-500/15 text-rose-300 border-rose-500/35"
+                                  : ord.scheduledDate === todayIso
+                                  ? "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                                  : "bg-slate-800 text-slate-300 border-white/[0.07]"
+                              }`}
+                            >
+                              <Calendar className="w-3 h-3" />
+                              {!isCompleted && ord.scheduledDate && ord.scheduledDate < todayIso
+                                ? "Atrasado · "
+                                : ord.scheduledDate === todayIso
+                                ? "Hoy"
+                                : ord.scheduledDate === tomorrowIso
+                                ? "Mañana"
+                                : ord.scheduledDate
+                                ? new Date(ord.scheduledDate + "T12:00:00").toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" })
+                                : "Flexible"}
+                              {!isCompleted && ord.scheduledDate && ord.scheduledDate < todayIso
+                                ? new Date(ord.scheduledDate + "T12:00:00").toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit" })
+                                : ""}
+                              {ord.timeSlot && ord.timeSlot !== "Indiferente"
+                                ? ` · ${ord.timeSlot}`
+                                : ""}
+                            </span>
+                          )}
                         </div>
 
                         <div className="text-slate-400 text-xs flex items-center gap-1">
@@ -1969,6 +2166,15 @@ export default function CustomerOrdersTab({
                       <div className="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
+                          onClick={() => setHistoryCustomer(ord.customer)}
+                          className="p-2 rounded-xl text-slate-400 hover:text-sky-300 hover:bg-slate-800 transition"
+                          title="Historial completo del cliente"
+                        >
+                          <History className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => handleStartEdit(ord)}
                           className={`p-2 rounded-xl transition ${
                             isEditing
@@ -2024,6 +2230,28 @@ export default function CustomerOrdersTab({
           </div>
         </div>
       </div>
+
+      <CustomerHistoryModal
+        customer={historyCustomer}
+        orders={orders}
+        onClose={() => setHistoryCustomer(null)}
+        onCreateNewOrder={(c) => {
+          selectExistingCustomer(c);
+          setEditingOrderId(null);
+          formContainerRef.current?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        }}
+        onEditCustomer={(c) => {
+          selectExistingCustomer(c);
+          setIsMapExpanded(true);
+          formContainerRef.current?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        }}
+      />
     </div>
   );
 }

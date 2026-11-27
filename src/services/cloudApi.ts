@@ -5,6 +5,7 @@ import {
   ServiceOrder,
   ServiceStatus,
   ServiceType,
+  TimeSlot,
   StorageQuotaStats,
   TechnicianConfig,
   UserProfile,
@@ -105,6 +106,8 @@ export const cloudApi = {
       estimatedMinutes?: number;
       estimatedPriceEur?: number;
       technicalNotes?: string;
+      scheduledDate?: string | null;
+      timeSlot?: TimeSlot;
     }
   ): Promise<ServiceOrder> {
     const res = await requestJson<{ order: ServiceOrder }>("/api/orders", {
@@ -127,6 +130,8 @@ export const cloudApi = {
       estimatedMinutes?: number;
       estimatedPriceEur?: number;
       technicalNotes?: string;
+      scheduledDate?: string | null;
+      timeSlot?: TimeSlot;
       status?: ServiceStatus;
     }
   ): Promise<ServiceOrder> {

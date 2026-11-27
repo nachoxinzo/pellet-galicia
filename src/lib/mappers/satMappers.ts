@@ -5,6 +5,7 @@ import {
   ServiceStatus,
   ServiceType,
   OrderPriority,
+  TimeSlot,
   TechnicianConfig,
   FIELD_SERVICE_RULES,
 } from "@/types/pelletGalicia";
@@ -12,6 +13,7 @@ import { decryptField } from "@/lib/security/fieldCrypto";
 
 export const serviceTypeSchema = z.enum(["Avería", "Revisión", "Instalación"]);
 export const orderPrioritySchema = z.enum(["Urgente", "Normal"]);
+export const timeSlotSchema = z.enum(["Mañana", "Tarde", "Indiferente"]);
 export const orderStatusSchema = z.enum([
   "Pendiente",
   "En Ruta",
@@ -49,6 +51,12 @@ export const orderCreateSchema = z.object({
   estimatedMinutes: z.number().int().min(5).max(480).default(45),
   estimatedPriceEur: z.number().min(0).max(100000).optional().default(0),
   technicalNotes: z.string().trim().max(1000).optional(),
+  scheduledDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida")
+    .nullable()
+    .optional(),
+  timeSlot: timeSlotSchema.optional(),
 });
 
 export const orderUpdateSchema = z.object({
@@ -59,6 +67,12 @@ export const orderUpdateSchema = z.object({
   estimatedMinutes: z.number().int().min(5).max(480).optional(),
   estimatedPriceEur: z.number().min(0).max(100000).optional(),
   technicalNotes: z.string().trim().max(1000).optional(),
+  scheduledDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida")
+    .nullable()
+    .optional(),
+  timeSlot: timeSlotSchema.optional(),
   status: orderStatusSchema.optional(),
 });
 
@@ -119,6 +133,8 @@ export interface ServiceOrderDbRow {
   technical_notes_enc: string;
   resolution_note_enc: string;
   concello: string;
+  scheduled_date?: string | null;
+  time_slot?: string | null;
   status: string;
   dispatched_at: string | null;
   completed_at: string | null;
@@ -203,6 +219,8 @@ export function mapOrderRow(row: ServiceOrderDbRow): ServiceOrder | null {
     technicalNotes: decryptField(row.technical_notes_enc),
     resolutionNote: decryptField(row.resolution_note_enc) || undefined,
     concello: row.concello || customer.village || "General",
+    scheduledDate: row.scheduled_date || null,
+    timeSlot: (row.time_slot as TimeSlot) || "Indiferente",
     status: (row.status as ServiceStatus) || "Pendiente",
     dispatchedAt: row.dispatched_at || undefined,
     completedAt: row.completed_at || undefined,

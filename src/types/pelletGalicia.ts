@@ -20,6 +20,7 @@ export interface Coordinates {
 export type ServiceType = "Avería" | "Revisión" | "Instalación";
 export type OrderPriority = "Urgente" | "Normal";
 export type ServiceStatus = "Pendiente" | "En Ruta" | "Completado" | "Cancelado";
+export type TimeSlot = "Mañana" | "Tarde" | "Indiferente";
 export type UserRole = "admin" | "tecnico";
 
 export interface UserProfile {
@@ -101,6 +102,8 @@ export interface ServiceOrder {
   technicalNotes?: string; // Síntoma, material o repuestos necesarios
   resolutionNote?: string; // Nota breve de cierre reportada por el técnico
   concello?: string;
+  scheduledDate?: string | null; // YYYY-MM-DD
+  timeSlot?: TimeSlot;
   status: ServiceStatus;
   dispatchedAt?: string;
   completedAt?: string;
@@ -142,6 +145,8 @@ export interface EphemeralStop {
   cashToCollectEur?: number; // Presupuesto o importe a cobrar (€)
   tags?: string; // Material / notas técnicas / alertas cortas
   phone?: string; // Teléfono opcional para botón tel: en campo
+  scheduledDate?: string | null;
+  timeSlot?: TimeSlot;
 }
 
 /**

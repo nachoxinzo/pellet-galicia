@@ -390,7 +390,18 @@ export default function RoutePlannerTab({
   }, [pendingOrders]);
 
   const filteredAvailableOrders = useMemo(() => {
+    const now = new Date();
+    const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
+      2,
+      "0"
+    )}-${String(now.getDate()).padStart(2, "0")}`;
+
     if (concelloFilter === "ALL") return pendingOrders;
+    if (concelloFilter === "HOY") {
+      return pendingOrders.filter(
+        (o) => !o.scheduledDate || o.scheduledDate <= todayIso
+      );
+    }
     if (concelloFilter === "URGENTES") {
       return pendingOrders.filter((o) => o.priority === "Urgente");
     }
@@ -928,6 +939,7 @@ export default function RoutePlannerTab({
                   <option value="ALL">
                     Todos los Concellos ({pendingOrders.length})
                   </option>
+                  <option value="HOY">📅 Solo Agenda de Hoy / Atrasados</option>
                   <option value="URGENTES">🚨 Solo Averías Urgentes</option>
                   {availableConcellos.map((c) => (
                     <option key={c} value={c}>
@@ -979,6 +991,17 @@ export default function RoutePlannerTab({
                         {ord.customer.village}
                         {ord.equipmentInfo ? ` · ⚙️ ${ord.equipmentInfo}` : ""}
                       </div>
+                      {(ord.scheduledDate || (ord.timeSlot && ord.timeSlot !== "Indiferente")) && (
+                        <div className="text-[10px] text-sky-300 font-semibold">
+                          📅{" "}
+                          {ord.scheduledDate
+                            ? new Date(ord.scheduledDate + "T12:00:00").toLocaleDateString("es-ES")
+                            : "Sin fecha"}
+                          {ord.timeSlot && ord.timeSlot !== "Indiferente"
+                            ? ` · ${ord.timeSlot}`
+                            : ""}
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <span className="font-black text-amber-400 font-mono">
